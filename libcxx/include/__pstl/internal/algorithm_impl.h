@@ -24,56 +24,8 @@
 #include "pstl_config.h"
 #include "unseq_backend_simd.h"
 
-_PSTL_HIDE_FROM_ABI_PUSH
-
 namespace __pstl {
 namespace __internal {
-
-//------------------------------------------------------------------------
-// any_of
-//------------------------------------------------------------------------
-
-template <class _ForwardIterator, class _Pred>
-bool __brick_any_of(const _ForwardIterator __first,
-                    const _ForwardIterator __last,
-                    _Pred __pred,
-                    /*__is_vector=*/std::false_type) noexcept {
-  return std::any_of(__first, __last, __pred);
-};
-
-template <class _RandomAccessIterator, class _Pred>
-bool __brick_any_of(const _RandomAccessIterator __first,
-                    const _RandomAccessIterator __last,
-                    _Pred __pred,
-                    /*__is_vector=*/std::true_type) noexcept {
-  return __unseq_backend::__simd_or(__first, __last - __first, __pred);
-};
-
-template <class _Tag, class _ExecutionPolicy, class _ForwardIterator, class _Pred>
-bool __pattern_any_of(
-    _Tag, _ExecutionPolicy&&, _ForwardIterator __first, _ForwardIterator __last, _Pred __pred) noexcept {
-  return __internal::__brick_any_of(__first, __last, __pred, typename _Tag::__is_vector{});
-}
-
-template <class _IsVector, class _ExecutionPolicy, class _RandomAccessIterator, class _Pred>
-bool __pattern_any_of(__parallel_tag<_IsVector> __tag,
-                      _ExecutionPolicy&& __exec,
-                      _RandomAccessIterator __first,
-                      _RandomAccessIterator __last,
-                      _Pred __pred) {
-  using __backend_tag = typename decltype(__tag)::__backend_tag;
-
-  return __internal::__except_handler([&]() {
-    return __internal::__parallel_or(
-        __backend_tag{},
-        std::forward<_ExecutionPolicy>(__exec),
-        __first,
-        __last,
-        [__pred](_RandomAccessIterator __i, _RandomAccessIterator __j) {
-          return __internal::__brick_any_of(__i, __j, __pred, _IsVector{});
-        });
-  });
-}
 
 // [alg.foreach]
 // for_each_n with no policy
@@ -622,60 +574,6 @@ bool __pattern_equal(
         [__first1, __first2, __p](_RandomAccessIterator1 __i, _RandomAccessIterator1 __j) {
           return !__internal::__brick_equal(__i, __j, __first2 + (__i - __first1), __p, _IsVector{});
         });
-  });
-}
-
-//------------------------------------------------------------------------
-// find_if
-//------------------------------------------------------------------------
-template <class _ForwardIterator, class _Predicate>
-_ForwardIterator
-__brick_find_if(_ForwardIterator __first,
-                _ForwardIterator __last,
-                _Predicate __pred,
-                /*is_vector=*/std::false_type) noexcept {
-  return std::find_if(__first, __last, __pred);
-}
-
-template <class _RandomAccessIterator, class _Predicate>
-_RandomAccessIterator
-__brick_find_if(_RandomAccessIterator __first,
-                _RandomAccessIterator __last,
-                _Predicate __pred,
-                /*is_vector=*/std::true_type) noexcept {
-  typedef typename std::iterator_traits<_RandomAccessIterator>::difference_type _SizeType;
-  return __unseq_backend::__simd_first(
-      __first, _SizeType(0), __last - __first, [&__pred](_RandomAccessIterator __it, _SizeType __i) {
-        return __pred(__it[__i]);
-      });
-}
-
-template <class _Tag, class _ExecutionPolicy, class _ForwardIterator, class _Predicate>
-_ForwardIterator __pattern_find_if(
-    _Tag, _ExecutionPolicy&&, _ForwardIterator __first, _ForwardIterator __last, _Predicate __pred) noexcept {
-  return __internal::__brick_find_if(__first, __last, __pred, typename _Tag::__is_vector{});
-}
-
-template <class _IsVector, class _ExecutionPolicy, class _RandomAccessIterator, class _Predicate>
-_RandomAccessIterator __pattern_find_if(
-    __parallel_tag<_IsVector> __tag,
-    _ExecutionPolicy&& __exec,
-    _RandomAccessIterator __first,
-    _RandomAccessIterator __last,
-    _Predicate __pred) {
-  using __backend_tag = typename decltype(__tag)::__backend_tag;
-
-  return __internal::__except_handler([&]() {
-    return __internal::__parallel_find(
-        __backend_tag{},
-        std::forward<_ExecutionPolicy>(__exec),
-        __first,
-        __last,
-        [__pred](_RandomAccessIterator __i, _RandomAccessIterator __j) {
-          return __internal::__brick_find_if(__i, __j, __pred, _IsVector{});
-        },
-        std::less<typename std::iterator_traits<_RandomAccessIterator>::difference_type>(),
-        /*is_first=*/true);
   });
 }
 
@@ -1428,7 +1326,7 @@ __brick_unique(_RandomAccessIterator __first,
                _RandomAccessIterator __last,
                _BinaryPredicate __pred,
                /*is_vector=*/std::true_type) noexcept {
-  _PSTL_PRAGMA_MESSAGE("Vectorized algorithm unimplemented, redirected to serial");
+  // TODO: vectorize
   return std::unique(__first, __last, __pred);
 }
 
@@ -2190,7 +2088,7 @@ _RandomAccessIterator __brick_partition(
     _RandomAccessIterator __last,
     _UnaryPredicate __pred,
     /*is_vector=*/std::true_type) noexcept {
-  _PSTL_PRAGMA_MESSAGE("Vectorized algorithm unimplemented, redirected to serial");
+  // TODO: vectorize
   return std::partition(__first, __last, __pred);
 }
 
@@ -2296,7 +2194,7 @@ _RandomAccessIterator __brick_stable_partition(
     _RandomAccessIterator __last,
     _UnaryPredicate __pred,
     /*__is_vector=*/std::true_type) noexcept {
-  _PSTL_PRAGMA_MESSAGE("Vectorized algorithm unimplemented, redirected to serial");
+  // TODO: vectorize
   return std::stable_partition(__first, __last, __pred);
 }
 
@@ -2834,84 +2732,6 @@ void __pattern_nth_element(
 }
 
 //------------------------------------------------------------------------
-// fill, fill_n
-//------------------------------------------------------------------------
-template <class _RandomAccessIterator, class _Tp>
-void __brick_fill(_RandomAccessIterator __first,
-                  _RandomAccessIterator __last,
-                  const _Tp& __value,
-                  /* __is_vector = */ std::true_type) noexcept {
-  __unseq_backend::__simd_fill_n(__first, __last - __first, __value);
-}
-
-template <class _ForwardIterator, class _Tp>
-void __brick_fill(_ForwardIterator __first,
-                  _ForwardIterator __last,
-                  const _Tp& __value,
-                  /* __is_vector = */ std::false_type) noexcept {
-  std::fill(__first, __last, __value);
-}
-
-template <class _Tag, class _ExecutionPolicy, class _ForwardIterator, class _Tp>
-void __pattern_fill(
-    _Tag, _ExecutionPolicy&&, _ForwardIterator __first, _ForwardIterator __last, const _Tp& __value) noexcept {
-  __internal::__brick_fill(__first, __last, __value, typename _Tag::__is_vector{});
-}
-
-template <class _IsVector, class _ExecutionPolicy, class _RandomAccessIterator, class _Tp>
-_RandomAccessIterator __pattern_fill(
-    __parallel_tag<_IsVector> __tag,
-    _ExecutionPolicy&& __exec,
-    _RandomAccessIterator __first,
-    _RandomAccessIterator __last,
-    const _Tp& __value) {
-  using __backend_tag = typename decltype(__tag)::__backend_tag;
-
-  return __internal::__except_handler([&__exec, __first, __last, &__value]() {
-    __par_backend::__parallel_for(
-        __backend_tag{},
-        std::forward<_ExecutionPolicy>(__exec),
-        __first,
-        __last,
-        [&__value](_RandomAccessIterator __begin, _RandomAccessIterator __end) {
-          __internal::__brick_fill(__begin, __end, __value, _IsVector{});
-        });
-    return __last;
-  });
-}
-
-template <class _RandomAccessIterator, class _Size, class _Tp>
-_RandomAccessIterator
-__brick_fill_n(_RandomAccessIterator __first,
-               _Size __count,
-               const _Tp& __value,
-               /* __is_vector = */ std::true_type) noexcept {
-  return __unseq_backend::__simd_fill_n(__first, __count, __value);
-}
-
-template <class _OutputIterator, class _Size, class _Tp>
-_OutputIterator __brick_fill_n(
-    _OutputIterator __first, _Size __count, const _Tp& __value, /* __is_vector = */ std::false_type) noexcept {
-  return std::fill_n(__first, __count, __value);
-}
-
-template <class _Tag, class _ExecutionPolicy, class _OutputIterator, class _Size, class _Tp>
-_OutputIterator
-__pattern_fill_n(_Tag, _ExecutionPolicy&&, _OutputIterator __first, _Size __count, const _Tp& __value) noexcept {
-  return __internal::__brick_fill_n(__first, __count, __value, typename _Tag::__is_vector{});
-}
-
-template <class _IsVector, class _ExecutionPolicy, class _RandomAccessIterator, class _Size, class _Tp>
-_RandomAccessIterator __pattern_fill_n(
-    __parallel_tag<_IsVector> __tag,
-    _ExecutionPolicy&& __exec,
-    _RandomAccessIterator __first,
-    _Size __count,
-    const _Tp& __value) {
-  return __internal::__pattern_fill(__tag, std::forward<_ExecutionPolicy>(__exec), __first, __first + __count, __value);
-}
-
-//------------------------------------------------------------------------
 // generate, generate_n
 //------------------------------------------------------------------------
 template <class _RandomAccessIterator, class _Generator>
@@ -3073,7 +2893,7 @@ _RandomAccessIterator3 __brick_merge(
     _RandomAccessIterator3 __d_first,
     _Compare __comp,
     /* __is_vector = */ std::true_type) noexcept {
-  _PSTL_PRAGMA_MESSAGE("Vectorized algorithm unimplemented, redirected to serial");
+  // TODO: vectorize
   return std::merge(__first1, __last1, __first2, __last2, __d_first, __comp);
 }
 
@@ -3151,7 +2971,7 @@ void __brick_inplace_merge(
     _RandomAccessIterator __last,
     _Compare __comp,
     /* __is_vector = */ std::true_type) noexcept {
-  _PSTL_PRAGMA_MESSAGE("Vectorized algorithm unimplemented, redirected to serial")
+  // TODO: vectorize
   std::inplace_merge(__first, __middle, __last, __comp);
 }
 
@@ -3589,7 +3409,7 @@ _OutputIterator __brick_set_union(
     _OutputIterator __result,
     _Compare __comp,
     /*__is_vector=*/std::true_type) noexcept {
-  _PSTL_PRAGMA_MESSAGE("Vectorized algorithm unimplemented, redirected to serial");
+  // TODO: vectorize
   return std::set_union(__first1, __last1, __first2, __last2, __result, __comp);
 }
 
@@ -3680,7 +3500,7 @@ _RandomAccessIterator3 __brick_set_intersection(
     _RandomAccessIterator3 __result,
     _Compare __comp,
     /*__is_vector=*/std::true_type) noexcept {
-  _PSTL_PRAGMA_MESSAGE("Vectorized algorithm unimplemented, redirected to serial");
+  // TODO: vectorize
   return std::set_intersection(__first1, __last1, __first2, __last2, __result, __comp);
 }
 
@@ -3816,7 +3636,7 @@ _RandomAccessIterator3 __brick_set_difference(
     _RandomAccessIterator3 __result,
     _Compare __comp,
     /*__is_vector=*/std::true_type) noexcept {
-  _PSTL_PRAGMA_MESSAGE("Vectorized algorithm unimplemented, redirected to serial");
+  // TODO: vectorize
   return std::set_difference(__first1, __last1, __first2, __last2, __result, __comp);
 }
 
@@ -3954,7 +3774,7 @@ _RandomAccessIterator3 __brick_set_symmetric_difference(
     _RandomAccessIterator3 __result,
     _Compare __comp,
     /*__is_vector=*/std::true_type) noexcept {
-  _PSTL_PRAGMA_MESSAGE("Vectorized algorithm unimplemented, redirected to serial");
+  // TODO: vectorize
   return std::set_symmetric_difference(__first1, __last1, __first2, __last2, __result, __comp);
 }
 
@@ -4247,13 +4067,7 @@ std::pair<_ForwardIterator1, _ForwardIterator2> __mismatch_serial(
     _ForwardIterator2 __first2,
     _ForwardIterator2 __last2,
     _BinaryPredicate __pred) {
-#if defined(_PSTL_CPP14_2RANGE_MISMATCH_EQUAL_PRESENT)
   return std::mismatch(__first1, __last1, __first2, __last2, __pred);
-#else
-  for (; __first1 != __last1 && __first2 != __last2 && __pred(*__first1, *__first2); ++__first1, ++__first2) {
-  }
-  return std::make_pair(__first1, __first2);
-#endif
 }
 
 template <class _ForwardIterator1, class _ForwardIterator2, class _Predicate>
@@ -4438,7 +4252,5 @@ bool __pattern_lexicographical_compare(
 
 } // namespace __internal
 } // namespace __pstl
-
-_PSTL_HIDE_FROM_ABI_POP
 
 #endif /* _PSTL_ALGORITHM_IMPL_H */

@@ -105,23 +105,24 @@ genObjectList(const Fortran::parser::AccObjectList &objectList,
 static llvm::SmallVector<mlir::Value>
 genBoundsOpsFromBox(fir::FirOpBuilder &builder, mlir::Location loc,
                     Fortran::lower::AbstractConverter &converter,
-                    Fortran::lower::SymbolRef sym, mlir::Value box, int rank) {
+                    fir::ExtendedValue dataExv, mlir::Value box) {
   llvm::SmallVector<mlir::Value> bounds;
   mlir::Type idxTy = builder.getIndexType();
-  fir::ExtendedValue dataExv = converter.getSymbolExtendedValue(sym);
   mlir::Type boundTy = builder.getType<mlir::acc::DataBoundsType>();
   mlir::Value one = builder.createIntegerConstant(loc, idxTy, 1);
   assert(box.getType().isa<fir::BaseBoxType>() && "expect firbox or fir.class");
-  for (int dim = 0; dim < rank; ++dim) {
+  for (unsigned dim = 0; dim < dataExv.rank(); ++dim) {
     mlir::Value d = builder.createIntegerConstant(loc, idxTy, dim);
     mlir::Value baseLb =
         fir::factory::readLowerBound(builder, loc, dataExv, dim, one);
     auto dimInfo =
         builder.create<fir::BoxDimsOp>(loc, idxTy, idxTy, idxTy, box, d);
-    mlir::Value empty;
+    mlir::Value lb = builder.createIntegerConstant(loc, idxTy, 0);
+    mlir::Value ub =
+        builder.create<mlir::arith::SubIOp>(loc, dimInfo.getExtent(), one);
     mlir::Value bound = builder.create<mlir::acc::DataBoundsOp>(
-        loc, boundTy, empty, empty, dimInfo.getExtent(),
-        dimInfo.getByteStride(), true, baseLb);
+        loc, boundTy, lb, ub, mlir::Value(), dimInfo.getByteStride(), true,
+        baseLb);
     bounds.push_back(bound);
   }
   return bounds;
@@ -132,23 +133,27 @@ genBoundsOpsFromBox(fir::FirOpBuilder &builder, mlir::Location loc,
 static llvm::SmallVector<mlir::Value>
 genBaseBoundsOps(fir::FirOpBuilder &builder, mlir::Location loc,
                  Fortran::lower::AbstractConverter &converter,
-                 const Fortran::parser::Name &name, mlir::Value baseAddr) {
+                 fir::ExtendedValue dataExv, mlir::Value baseAddr) {
   mlir::Type idxTy = builder.getIndexType();
   mlir::Type boundTy = builder.getType<mlir::acc::DataBoundsType>();
-  fir::ExtendedValue dataExv = converter.getSymbolExtendedValue(*name.symbol);
   llvm::SmallVector<mlir::Value> bounds;
 
   if (dataExv.rank() == 0)
     return bounds;
 
+  mlir::Value one = builder.createIntegerConstant(loc, idxTy, 1);
   for (std::size_t dim = 0; dim < dataExv.rank(); ++dim) {
-    mlir::Value one = builder.createIntegerConstant(loc, idxTy, 1);
-    mlir::Value startIdx =
+    mlir::Value baseLb =
         fir::factory::readLowerBound(builder, loc, dataExv, dim, one);
-    mlir::Value extent = fir::factory::readExtent(builder, loc, dataExv, dim);
+    mlir::Value ext = fir::factory::readExtent(builder, loc, dataExv, dim);
+    mlir::Value lb =
+        baseLb == one ? builder.createIntegerConstant(loc, idxTy, 0) : baseLb;
+
+    // ub = baseLb + extent - 1
+    mlir::Value lbExt = builder.create<mlir::arith::AddIOp>(loc, ext, baseLb);
+    mlir::Value ub = builder.create<mlir::arith::SubIOp>(loc, lbExt, one);
     mlir::Value bound = builder.create<mlir::acc::DataBoundsOp>(
-        loc, boundTy, mlir::Value(), mlir::Value(), extent, mlir::Value(),
-        false, startIdx);
+        loc, boundTy, lb, ub, mlir::Value(), one, false, baseLb);
     bounds.push_back(bound);
   }
   return bounds;
@@ -161,14 +166,15 @@ genBoundsOps(fir::FirOpBuilder &builder, mlir::Location loc,
              Fortran::lower::AbstractConverter &converter,
              Fortran::lower::StatementContext &stmtCtx,
              const std::list<Fortran::parser::SectionSubscript> &subscripts,
-             std::stringstream &asFortran, const Fortran::parser::Name &name,
+             std::stringstream &asFortran, fir::ExtendedValue &dataExv,
              mlir::Value baseAddr) {
   int dimension = 0;
   mlir::Type idxTy = builder.getIndexType();
   mlir::Type boundTy = builder.getType<mlir::acc::DataBoundsType>();
   llvm::SmallVector<mlir::Value> bounds;
-  fir::ExtendedValue dataExv = converter.getSymbolExtendedValue(*name.symbol);
 
+  mlir::Value zero = builder.createIntegerConstant(loc, idxTy, 0);
+  mlir::Value one = builder.createIntegerConstant(loc, idxTy, 1);
   for (const auto &subscript : subscripts) {
     if (const auto *triplet{
             std::get_if<Fortran::parser::SubscriptTriplet>(&subscript.u)}) {
@@ -176,11 +182,10 @@ genBoundsOps(fir::FirOpBuilder &builder, mlir::Location loc,
         asFortran << ',';
       mlir::Value lbound, ubound, extent;
       std::optional<std::int64_t> lval, uval;
-      mlir::Value one = builder.createIntegerConstant(loc, idxTy, 1);
       mlir::Value baseLb =
           fir::factory::readLowerBound(builder, loc, dataExv, dimension, one);
       bool defaultLb = baseLb == one;
-      mlir::Value stride;
+      mlir::Value stride = one;
       bool strideInBytes = false;
 
       if (fir::unwrapRefType(baseAddr.getType()).isa<fir::BaseBoxType>()) {
@@ -211,6 +216,8 @@ genBoundsOps(fir::FirOpBuilder &builder, mlir::Location loc,
           lbound = builder.create<mlir::arith::SubIOp>(loc, lb, baseLb);
           asFortran << lexpr->AsFortran();
         }
+      } else {
+        lbound = defaultLb ? zero : baseLb;
       }
       asFortran << ':';
       const auto &upper{std::get<1>(triplet->t)};
@@ -247,10 +254,13 @@ genBoundsOps(fir::FirOpBuilder &builder, mlir::Location loc,
           }
         }
       }
+      // ub = baseLb + extent - 1
       if (!ubound) {
-        extent = fir::factory::readExtent(builder, loc, dataExv, dimension);
-        if (lbound)
-          extent = builder.create<mlir::arith::SubIOp>(loc, extent, lbound);
+        mlir::Value ext =
+            fir::factory::readExtent(builder, loc, dataExv, dimension);
+        mlir::Value lbExt =
+            builder.create<mlir::arith::AddIOp>(loc, ext, baseLb);
+        ubound = builder.create<mlir::arith::SubIOp>(loc, lbExt, one);
       }
       mlir::Value bound = builder.create<mlir::acc::DataBoundsOp>(
           loc, boundTy, lbound, ubound, extent, stride, strideInBytes, baseLb);
@@ -301,24 +311,16 @@ genDataOperandOperations(const Fortran::parser::AccObjectList &objectList,
   auto createOpAndAddOperand = [&](mlir::Value baseAddr, llvm::StringRef name,
                                    mlir::Location loc,
                                    llvm::SmallVector<mlir::Value> &bounds) {
-    if (auto boxTy = baseAddr.getType().dyn_cast<fir::BaseBoxType>()) {
-      // Get the actual data address when the descriptor is an allocatable or
-      // a pointer.
-      if (boxTy.getEleTy().isa<fir::HeapType, fir::PointerType>()) {
-        mlir::Value boxAddr = builder.create<fir::BoxAddrOp>(
-            loc, fir::ReferenceType::get(boxTy.getEleTy()), baseAddr);
-        baseAddr = builder.create<fir::LoadOp>(loc, boxAddr);
-      } else { // Get the address of the boxed value.
-        baseAddr = builder.create<fir::BoxAddrOp>(loc, baseAddr);
-      }
-    }
+    if (auto boxTy = baseAddr.getType().dyn_cast<fir::BaseBoxType>())
+      baseAddr = builder.create<fir::BoxAddrOp>(loc, baseAddr);
 
     Op op = builder.create<Op>(loc, baseAddr.getType(), baseAddr);
     op.setNameAttr(builder.getStringAttr(name));
     op.setStructured(structured);
     op.setDataClause(dataClause);
+    unsigned insPos = 1;
     if (bounds.size() > 0)
-      op->insertOperands(1, bounds);
+      op->insertOperands(insPos, bounds);
     op->setAttr(Op::getOperandSegmentSizeAttr(),
                 builder.getDenseI32ArrayAttr(
                     {1, 0, static_cast<int32_t>(bounds.size())}));
@@ -343,43 +345,79 @@ genDataOperandOperations(const Fortran::parser::AccObjectList &objectList,
                   llvm::SmallVector<mlir::Value> bounds;
                   const auto *dataRef =
                       std::get_if<Fortran::parser::DataRef>(&designator.u);
-                  const Fortran::parser::Name &name =
-                      Fortran::parser::GetLastName(*dataRef);
+                  mlir::Value addr;
                   std::stringstream asFortran;
-                  asFortran << name.ToString();
-                  mlir::Value baseAddr =
-                      getDataOperandBaseAddr(*name.symbol, operandLocation);
+                  fir::ExtendedValue dataExv;
+                  if (Fortran::parser::Unwrap<
+                          Fortran::parser::StructureComponent>(
+                          arrayElement->base)) {
+                    auto exprBase = Fortran::semantics::AnalyzeExpr(
+                        semanticsContext, arrayElement->base);
+                    dataExv = converter.genExprAddr(operandLocation, *exprBase,
+                                                    stmtCtx);
+                    addr = fir::getBase(dataExv);
+                    asFortran << (*exprBase).AsFortran();
+                  } else {
+                    const Fortran::parser::Name &name =
+                        Fortran::parser::GetLastName(*dataRef);
+                    addr =
+                        getDataOperandBaseAddr(*name.symbol, operandLocation);
+                    dataExv = converter.getSymbolExtendedValue(*name.symbol);
+                    asFortran << name.ToString();
+                  }
                   if (!arrayElement->subscripts.empty()) {
                     asFortran << '(';
                     bounds = genBoundsOps(builder, operandLocation, converter,
                                           stmtCtx, arrayElement->subscripts,
-                                          asFortran, name, baseAddr);
+                                          asFortran, dataExv, addr);
                   }
                   asFortran << ')';
-                  createOpAndAddOperand(baseAddr, asFortran.str(),
-                                        operandLocation, bounds);
+                  createOpAndAddOperand(addr, asFortran.str(), operandLocation,
+                                        bounds);
                 } else if (Fortran::parser::Unwrap<
                                Fortran::parser::StructureComponent>(
                                designator)) {
-                  TODO(operandLocation, "OpenACC derived-type data operand");
+                  fir::ExtendedValue compExv =
+                      converter.genExprAddr(operandLocation, *expr, stmtCtx);
+                  mlir::Value addr = fir::getBase(compExv);
+                  llvm::SmallVector<mlir::Value> bounds;
+                  if (fir::unwrapRefType(addr.getType())
+                          .isa<fir::SequenceType>())
+                    bounds = genBaseBoundsOps(builder, operandLocation,
+                                              converter, compExv, addr);
+
+                  // If the component is an allocatable or pointer the result of
+                  // genExprAddr will be the result of a fir.box_addr operation.
+                  // Retrieve the box so we handle it like other descriptor.
+                  if (auto boxAddrOp = mlir::dyn_cast_or_null<fir::BoxAddrOp>(
+                          addr.getDefiningOp())) {
+                    addr = boxAddrOp.getVal();
+                    bounds = genBoundsOpsFromBox(builder, operandLocation,
+                                                 converter, compExv, addr);
+                  }
+
+                  createOpAndAddOperand(addr, (*expr).AsFortran(),
+                                        operandLocation, bounds);
                 } else {
                   // Scalar or full array.
                   if (const auto *dataRef{std::get_if<Fortran::parser::DataRef>(
                           &designator.u)}) {
                     const Fortran::parser::Name &name =
                         Fortran::parser::GetLastName(*dataRef);
+                    fir::ExtendedValue dataExv =
+                        converter.getSymbolExtendedValue(*name.symbol);
                     mlir::Value baseAddr =
                         getDataOperandBaseAddr(*name.symbol, operandLocation);
                     llvm::SmallVector<mlir::Value> bounds;
                     if (fir::unwrapRefType(baseAddr.getType())
                             .isa<fir::BaseBoxType>())
-                      bounds = genBoundsOpsFromBox(builder, operandLocation,
-                                                   converter, *name.symbol,
-                                                   baseAddr, (*expr).Rank());
-                    if (fir::unwrapRefType(baseAddr.getType())
-                            .isa<fir::SequenceType>())
+                      bounds =
+                          genBoundsOpsFromBox(builder, operandLocation,
+                                              converter, dataExv, baseAddr);
+                    else if (fir::unwrapRefType(baseAddr.getType())
+                                 .isa<fir::SequenceType>())
                       bounds = genBaseBoundsOps(builder, operandLocation,
-                                                converter, name, baseAddr);
+                                                converter, dataExv, baseAddr);
                     createOpAndAddOperand(baseAddr, name.ToString(),
                                           operandLocation, bounds);
                   } else { // Unsupported
@@ -633,12 +671,14 @@ createLoopOp(Fortran::lower::AbstractConverter &converter,
                        &clause.u)) {
       genObjectList(privateClause->v, converter, semanticsContext, stmtCtx,
                     privateOperands);
+    } else if (std::get_if<Fortran::parser::AccClause::Reduction>(&clause.u)) {
+      // Reduction clause is left out for the moment as the clause will probably
+      // end up having its own operation.
+      TODO(clauseLocation, "OpenACC compute construct reduction lowering");
     }
-    // Reduction clause is left out for the moment as the clause will probably
-    // end up having its own operation.
   }
 
-  // Prepare the operand segement size attribute and the operands value range.
+  // Prepare the operand segment size attribute and the operands value range.
   llvm::SmallVector<mlir::Value> operands;
   llvm::SmallVector<int32_t> operandSegments;
   addOperand(operands, operandSegments, gangNum);
@@ -850,10 +890,12 @@ createComputeOp(Fortran::lower::AbstractConverter &converter,
                        &clause.u)) {
       genObjectList(firstprivateClause->v, converter, semanticsContext, stmtCtx,
                     firstprivateOperands);
+    } else if (std::get_if<Fortran::parser::AccClause::Reduction>(&clause.u)) {
+      TODO(clauseLocation, "compute construct reduction clause lowering");
     }
   }
 
-  // Prepare the operand segement size attribute and the operands value range.
+  // Prepare the operand segment size attribute and the operands value range.
   llvm::SmallVector<mlir::Value, 8> operands;
   llvm::SmallVector<int32_t, 8> operandSegments;
   addOperand(operands, operandSegments, async);
@@ -1064,8 +1106,7 @@ genACCEnterDataOp(Fortran::lower::AbstractConverter &converter,
                   Fortran::lower::StatementContext &stmtCtx,
                   const Fortran::parser::AccClauseList &accClauseList) {
   mlir::Value ifCond, async, waitDevnum;
-  llvm::SmallVector<mlir::Value> copyinOperands, createOperands,
-      createZeroOperands, attachOperands, waitOperands, dataClauseOperands;
+  llvm::SmallVector<mlir::Value> waitOperands, dataClauseOperands;
 
   // Async, wait and self clause have optional values but can be present with
   // no value as well. When there is no value, the op has an attribute to
@@ -1076,7 +1117,7 @@ genACCEnterDataOp(Fortran::lower::AbstractConverter &converter,
   fir::FirOpBuilder &firOpBuilder = converter.getFirOpBuilder();
 
   // Lower clauses values mapped to operands.
-  // Keep track of each group of operands separatly as clauses can appear
+  // Keep track of each group of operands separately as clauses can appear
   // more than once.
   for (const Fortran::parser::AccClause &clause : accClauseList.v) {
     mlir::Location clauseLocation = converter.genLocation(clause.source);
@@ -1108,16 +1149,13 @@ genACCEnterDataOp(Fortran::lower::AbstractConverter &converter,
       const auto &modifier =
           std::get<std::optional<Fortran::parser::AccDataModifier>>(
               listWithModifier.t);
+      mlir::acc::DataClause clause = mlir::acc::DataClause::acc_create;
       if (modifier &&
-          (*modifier).v == Fortran::parser::AccDataModifier::Modifier::Zero) {
-        genDataOperandOperations<mlir::acc::CreateOp>(
-            accObjectList, converter, semanticsContext, stmtCtx,
-            dataClauseOperands, mlir::acc::DataClause::acc_create_zero, false);
-      } else {
-        genDataOperandOperations<mlir::acc::CreateOp>(
-            accObjectList, converter, semanticsContext, stmtCtx,
-            dataClauseOperands, mlir::acc::DataClause::acc_create, false);
-      }
+          (*modifier).v == Fortran::parser::AccDataModifier::Modifier::Zero)
+        clause = mlir::acc::DataClause::acc_create_zero;
+      genDataOperandOperations<mlir::acc::CreateOp>(
+          accObjectList, converter, semanticsContext, stmtCtx,
+          dataClauseOperands, clause, false);
     } else if (const auto *attachClause =
                    std::get_if<Fortran::parser::AccClause::Attach>(&clause.u)) {
       genDataOperandOperations<mlir::acc::AttachOp>(
@@ -1129,17 +1167,14 @@ genACCEnterDataOp(Fortran::lower::AbstractConverter &converter,
     }
   }
 
-  // Prepare the operand segement size attribute and the operands value range.
+  // Prepare the operand segment size attribute and the operands value range.
   llvm::SmallVector<mlir::Value, 16> operands;
   llvm::SmallVector<int32_t, 8> operandSegments;
   addOperand(operands, operandSegments, ifCond);
   addOperand(operands, operandSegments, async);
   addOperand(operands, operandSegments, waitDevnum);
   addOperands(operands, operandSegments, waitOperands);
-  addOperands(operands, operandSegments, copyinOperands);
-  addOperands(operands, operandSegments, createOperands);
-  addOperands(operands, operandSegments, createZeroOperands);
-  addOperands(operands, operandSegments, attachOperands);
+  operandSegments.append({0, 0, 0, 0});
   addOperands(operands, operandSegments, dataClauseOperands);
 
   mlir::acc::EnterDataOp enterDataOp = createSimpleOp<mlir::acc::EnterDataOp>(
@@ -1207,7 +1242,7 @@ genACCExitDataOp(Fortran::lower::AbstractConverter &converter,
     }
   }
 
-  // Prepare the operand segement size attribute and the operands value range.
+  // Prepare the operand segment size attribute and the operands value range.
   llvm::SmallVector<mlir::Value, 14> operands;
   llvm::SmallVector<int32_t, 7> operandSegments;
   addOperand(operands, operandSegments, ifCond);
@@ -1262,7 +1297,7 @@ genACCInitShutdownOp(Fortran::lower::AbstractConverter &converter,
     }
   }
 
-  // Prepare the operand segement size attribute and the operands value range.
+  // Prepare the operand segment size attribute and the operands value range.
   llvm::SmallVector<mlir::Value, 6> operands;
   llvm::SmallVector<int32_t, 3> operandSegments;
   addOperands(operands, operandSegments, deviceTypeOperands);
@@ -1322,7 +1357,7 @@ genACCUpdateOp(Fortran::lower::AbstractConverter &converter,
     }
   }
 
-  // Prepare the operand segement size attribute and the operands value range.
+  // Prepare the operand segment size attribute and the operands value range.
   llvm::SmallVector<mlir::Value> operands;
   llvm::SmallVector<int32_t> operandSegments;
   addOperand(operands, operandSegments, ifCond);
@@ -1431,7 +1466,7 @@ static void genACC(Fortran::lower::AbstractConverter &converter,
     }
   }
 
-  // Prepare the operand segement size attribute and the operands value range.
+  // Prepare the operand segment size attribute and the operands value range.
   llvm::SmallVector<mlir::Value> operands;
   llvm::SmallVector<int32_t> operandSegments;
   addOperands(operands, operandSegments, waitOperands);

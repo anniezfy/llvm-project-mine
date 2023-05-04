@@ -20,8 +20,6 @@
 #include "unseq_backend_simd.h"
 #include "algorithm_fwd.h"
 
-_PSTL_HIDE_FROM_ABI_PUSH
-
 namespace __pstl {
 namespace __internal {
 
@@ -216,7 +214,6 @@ std::pair<_OutputIterator, _Tp> __brick_transform_scan(
     /*is_vector=*/std::false_type) noexcept {
   for (; __first != __last; ++__first, ++__result) {
     *__result = __init;
-    _PSTL_PRAGMA_FORCEINLINE
     __init = __binary_op(__init, __unary_op(*__first));
   }
   return std::make_pair(__result, __init);
@@ -234,7 +231,6 @@ std::pair<_OutputIterator, _Tp> __brick_transform_scan(
     /*Inclusive*/ std::true_type,
     /*is_vector=*/std::false_type) noexcept {
   for (; __first != __last; ++__first, ++__result) {
-    _PSTL_PRAGMA_FORCEINLINE
     __init    = __binary_op(__init, __unary_op(*__first));
     *__result = __init;
   }
@@ -440,7 +436,6 @@ typename std::enable_if<std::is_floating_point<_Tp>::value, _OutputIterator>::ty
                                   __result + __i + __len,
                                   __result + __i,
                                   [&__initial, &__binary_op](const _Tp& __x) {
-                                    _PSTL_PRAGMA_FORCEINLINE
                                     return __binary_op(__initial, __x);
                                   }) -
                    1);
@@ -536,7 +531,5 @@ _RandomAccessIterator2 __pattern_adjacent_difference(
 
 } // namespace __internal
 } // namespace __pstl
-
-_PSTL_HIDE_FROM_ABI_POP
 
 #endif /* _PSTL_NUMERIC_IMPL_H */
