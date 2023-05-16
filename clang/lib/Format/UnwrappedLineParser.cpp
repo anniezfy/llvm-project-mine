@@ -4068,7 +4068,9 @@ void UnwrappedLineParser::parseJavaScriptEs6ImportExport() {
   // parsing the structural element, i.e. the declaration or expression for
   // `export default`.
   if (!IsImport && !FormatTok->isOneOf(tok::l_brace, tok::star) &&
-      !FormatTok->isStringLiteral()) {
+      !FormatTok->isStringLiteral() &&
+      !(FormatTok->is(Keywords.kw_type) &&
+        Tokens->peekNextToken()->isOneOf(tok::l_brace, tok::star))) {
     return;
   }
 
@@ -4194,11 +4196,14 @@ unsigned UnwrappedLineParser::parseVerilogHierarchyHeader() {
     if (FormatTok->is(Keywords.kw_verilogHash)) {
       NewLine();
       nextToken();
-      if (FormatTok->is(tok::l_paren))
+      if (FormatTok->is(tok::l_paren)) {
+        FormatTok->setFinalizedType(TT_VerilogMultiLineListLParen);
         parseParens();
+      }
     }
     if (FormatTok->is(tok::l_paren)) {
       NewLine();
+      FormatTok->setFinalizedType(TT_VerilogMultiLineListLParen);
       parseParens();
     }
 

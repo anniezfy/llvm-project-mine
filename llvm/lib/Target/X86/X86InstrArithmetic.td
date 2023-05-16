@@ -281,9 +281,9 @@ class BinOpMR_RMW<bits<8> opcode, string mnemonic, X86TypeInfo typeinfo,
            WriteALU.ReadAfterFold]>;  // reg
 
 // BinOpMR_RMW_FF - Binary instructions with inputs "[mem], reg", where the
-// pattern use EFLAGS as operand and implicitly use EFLAGS.
+// pattern sets EFLAGS and implicitly uses EFLAGS.
 class BinOpMR_RMW_FF<bits<8> opcode, string mnemonic, X86TypeInfo typeinfo,
-                    SDNode opnode>
+                     SDNode opnode>
   : BinOpMR<opcode, mnemonic, typeinfo,
             [(store (opnode (load addr:$dst), typeinfo.RegClass:$src, EFLAGS),
                     addr:$dst),
@@ -325,7 +325,7 @@ class BinOpMI_RMW<bits<8> opcode, string mnemonic, X86TypeInfo typeinfo,
     Sched<[WriteALURMW]>;
 
 // BinOpMI_RMW_FF - Binary instructions with inputs "[mem], imm", where the
-// pattern use EFLAGS as operand and implicitly use EFLAGS.
+// pattern sets EFLAGS and implicitly uses EFLAGS.
 class BinOpMI_RMW_FF<bits<8> opcode, string mnemonic, X86TypeInfo typeinfo,
                      SDNode opnode, Format f>
   : BinOpMI<opcode, mnemonic, typeinfo, f,
@@ -363,7 +363,7 @@ class BinOpMI8_RMW<string mnemonic, X86TypeInfo typeinfo,
     Sched<[WriteALURMW]>;
 
 // BinOpMI8_RMW_FF - Binary instructions with inputs "[mem], imm8", where the
-// pattern use EFLAGS as operand and implicitly use EFLAGS.
+// pattern sets EFLAGS and implicitly uses EFLAGS.
 class BinOpMI8_RMW_FF<string mnemonic, X86TypeInfo typeinfo,
                       SDPatternOperator opnode, Format f>
   : BinOpMI8<mnemonic, typeinfo, f,
@@ -427,8 +427,8 @@ class UnaryOpR<bits<8> opcode, Format f, string mnemonic, X86TypeInfo info,
 class INCDECR<Format f, string mnemonic, X86TypeInfo info,
               SDPatternOperator node>
   : UnaryOpR<0xFE, f, mnemonic, info,
-               [(set info.RegClass:$dst, EFLAGS,
-               (node info.RegClass:$src1, 1))]>;
+             [(set info.RegClass:$dst, EFLAGS,
+              (node info.RegClass:$src1, 1))]>;
 
 //  INCDECM - Instructions like "inc [mem]".
 class INCDECM<Format f, string mnemonic, X86TypeInfo info, int num>
@@ -459,8 +459,8 @@ class MulOpM<bits<8> opcode, Format f, string mnemonic, X86TypeInfo info,
 //  NegOpR - Instructions like "neg reg", with implicit EFLAGS.
 class NegOpR<bits<8> opcode, string mnemonic, X86TypeInfo info>
   : UnaryOpR<opcode, MRM3r, mnemonic, info,
-               [(set info.RegClass:$dst, (ineg info.RegClass:$src1)),
-                (implicit EFLAGS)]>;
+             [(set info.RegClass:$dst, (ineg info.RegClass:$src1)),
+              (implicit EFLAGS)]>;
 
 //  NotOpR - Instructions like "not reg".
 class NotOpR<bits<8> opcode, string mnemonic, X86TypeInfo info>
@@ -516,12 +516,11 @@ class IMulOpRM<bits<8> opcode, string mnemonic, X86TypeInfo info,
 class IMulOpRRI8<bits<8> opcode, string mnemonic, X86TypeInfo info,
                  X86FoldableSchedWrite sched>
   : ITy<opcode, MRMSrcReg, info, (outs info.RegClass:$dst),
-               (ins info.RegClass:$src1,
-               info.Imm8Operand:$src2), mnemonic,
-               "{$src2, $src1, $dst|$dst, $src1, $src2}",
-               [(set info.RegClass:$dst, EFLAGS,
-                (X86smul_flag info.RegClass:$src1,
-                info.Imm8NoSuOperator:$src2))]>,
+        (ins info.RegClass:$src1, info.Imm8Operand:$src2), mnemonic,
+        "{$src2, $src1, $dst|$dst, $src1, $src2}",
+        [(set info.RegClass:$dst, EFLAGS,
+         (X86smul_flag info.RegClass:$src1,
+                       info.Imm8NoSuOperator:$src2))]>,
     Sched<[sched]>{
   let ImmT = Imm8;
 }
@@ -530,12 +529,11 @@ class IMulOpRRI8<bits<8> opcode, string mnemonic, X86TypeInfo info,
 class IMulOpRRI<bits<8> opcode, string mnemonic, X86TypeInfo info,
                 X86FoldableSchedWrite sched>
   : ITy<opcode, MRMSrcReg, info, (outs info.RegClass:$dst),
-               (ins info.RegClass:$src1,
-               info.ImmOperand:$src2), mnemonic,
-               "{$src2, $src1, $dst|$dst, $src1, $src2}",
-               [(set info.RegClass:$dst, EFLAGS,
-                (X86smul_flag info.RegClass:$src1,
-                info.ImmNoSuOperator:$src2))]>,
+        (ins info.RegClass:$src1, info.ImmOperand:$src2), mnemonic,
+        "{$src2, $src1, $dst|$dst, $src1, $src2}",
+        [(set info.RegClass:$dst, EFLAGS,
+         (X86smul_flag info.RegClass:$src1,
+                       info.ImmNoSuOperator:$src2))]>,
     Sched<[sched]>{
   let ImmT = info.ImmEncoding;
 }
@@ -544,12 +542,11 @@ class IMulOpRRI<bits<8> opcode, string mnemonic, X86TypeInfo info,
 class IMulOpRMI8<bits<8> opcode, string mnemonic, X86TypeInfo info,
                  X86FoldableSchedWrite sched>
   : ITy<opcode, MRMSrcMem, info, (outs info.RegClass:$dst),
-               (ins info.MemOperand:$src1,
-               info.Imm8Operand:$src2), mnemonic,
-                "{$src2, $src1, $dst|$dst, $src1, $src2}",
-               [(set info.RegClass:$dst, EFLAGS,
-                (X86smul_flag (info.LoadNode addr:$src1),
-                info.Imm8NoSuOperator:$src2))]>,
+        (ins info.MemOperand:$src1, info.Imm8Operand:$src2), mnemonic,
+        "{$src2, $src1, $dst|$dst, $src1, $src2}",
+        [(set info.RegClass:$dst, EFLAGS,
+         (X86smul_flag (info.LoadNode addr:$src1),
+                        info.Imm8NoSuOperator:$src2))]>,
     Sched<[sched.Folded]>{
   let ImmT = Imm8;
 }
@@ -558,12 +555,11 @@ class IMulOpRMI8<bits<8> opcode, string mnemonic, X86TypeInfo info,
 class IMulOpRMI<bits<8> opcode, string mnemonic, X86TypeInfo info,
                 X86FoldableSchedWrite sched>
   : ITy<opcode, MRMSrcMem, info, (outs info.RegClass:$dst),
-               (ins info.MemOperand:$src1,
-               info.ImmOperand:$src2), mnemonic,
-               "{$src2, $src1, $dst|$dst, $src1, $src2}",
-               [(set info.RegClass:$dst, EFLAGS,
-                  (X86smul_flag (info.LoadNode addr:$src1),
-                  info.ImmNoSuOperator:$src2))]>,
+        (ins info.MemOperand:$src1, info.ImmOperand:$src2), mnemonic,
+        "{$src2, $src1, $dst|$dst, $src1, $src2}",
+        [(set info.RegClass:$dst, EFLAGS,
+         (X86smul_flag (info.LoadNode addr:$src1),
+                        info.ImmNoSuOperator:$src2))]>,
     Sched<[sched.Folded]>{
   let ImmT = info.ImmEncoding;
 }
@@ -582,17 +578,17 @@ def X86sub_flag_nocf : PatFrag<(ops node:$lhs, node:$rhs),
 let Defs = [EFLAGS] in {
 let Constraints = "$src1 = $dst", SchedRW = [WriteALU] in {
 let isConvertibleToThreeAddress = 1, CodeSize = 2 in { // Can xform into LEA.
-def INC8r  : INCDECR<MRM0r, "inc", Xi8, X86add_flag_nocf>;
-def INC16r : INCDECR<MRM0r, "inc", Xi16, X86add_flag_nocf>;
-def INC32r : INCDECR<MRM0r, "inc", Xi32, X86add_flag_nocf>;
-def INC64r : INCDECR<MRM0r, "inc", Xi64, X86add_flag_nocf>;
-} // isConvertibleToThreeAddress = 1, CodeSize = 2
-
 // Short forms only valid in 32-bit mode. Selected during MCInst lowering.
 let CodeSize = 1, hasSideEffects = 0 in {
 def INC16r_alt : INCDECR_ALT<0x40, "inc", Xi16>;
 def INC32r_alt : INCDECR_ALT<0x40, "inc", Xi32>;
 } // CodeSize = 1, hasSideEffects = 0
+
+def INC8r  : INCDECR<MRM0r, "inc", Xi8, X86add_flag_nocf>;
+def INC16r : INCDECR<MRM0r, "inc", Xi16, X86add_flag_nocf>;
+def INC32r : INCDECR<MRM0r, "inc", Xi32, X86add_flag_nocf>;
+def INC64r : INCDECR<MRM0r, "inc", Xi64, X86add_flag_nocf>;
+} // isConvertibleToThreeAddress = 1, CodeSize = 2
 } // Constraints = "$src1 = $dst", SchedRW
 
 let CodeSize = 2, SchedRW = [WriteALURMW] in {
@@ -607,18 +603,18 @@ let Predicates = [UseIncDec, In64BitMode] in {
 } // CodeSize = 2, SchedRW
 
 let Constraints = "$src1 = $dst", SchedRW = [WriteALU] in {
+// Short forms only valid in 32-bit mode. Selected during MCInst lowering.
+let CodeSize = 1, hasSideEffects = 0 in {
+def DEC16r_alt : INCDECR_ALT<0x48, "dec", Xi16>;
+def DEC32r_alt : INCDECR_ALT<0x48, "dec", Xi32>;
+} // CodeSize = 1, hasSideEffects = 0
+
 let isConvertibleToThreeAddress = 1, CodeSize = 2 in { // Can xform into LEA.
 def DEC8r  : INCDECR<MRM1r, "dec", Xi8, X86sub_flag_nocf>;
 def DEC16r : INCDECR<MRM1r, "dec", Xi16, X86sub_flag_nocf>;
 def DEC32r : INCDECR<MRM1r, "dec", Xi32, X86sub_flag_nocf>;
 def DEC64r : INCDECR<MRM1r, "dec", Xi64, X86sub_flag_nocf>;
 } // isConvertibleToThreeAddress = 1, CodeSize = 2
-
-// Short forms only valid in 32-bit mode. Selected during MCInst lowering.
-let CodeSize = 1, hasSideEffects = 0 in {
-def DEC16r_alt : INCDECR_ALT<0x48, "dec", Xi16>;
-def DEC32r_alt : INCDECR_ALT<0x48, "dec", Xi32>;
-} // CodeSize = 1, hasSideEffects = 0
 } // Constraints = "$src1 = $dst", SchedRW
 
 let CodeSize = 2, SchedRW = [WriteALURMW] in {
