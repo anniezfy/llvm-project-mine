@@ -17,7 +17,9 @@
 #include "mlir/Dialect/Transform/IR/TransformDialect.h"
 #include "mlir/Dialect/Transform/IR/TransformInterfaces.h"
 #include "mlir/Dialect/Transform/IR/TransformOps.h"
+#include "mlir/Dialect/Transform/PDLExtension/PDLExtensionOps.h"
 #include "mlir/IR/OpImplementation.h"
+#include "mlir/IR/PatternMatch.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Compiler.h"
@@ -174,6 +176,10 @@ void mlir::test::TestProduceValueHandleToArgumentOfParentBlock::getEffects(
   transform::onlyReadsHandle(getIn(), effects);
   transform::producesHandle(getOut(), effects);
   transform::onlyReadsPayload(effects);
+}
+
+bool mlir::test::TestConsumeOperand::allowsRepeatedHandleOperands() {
+  return getAllowRepeatedHandles();
 }
 
 DiagnosedSilenceableFailure
@@ -625,6 +631,12 @@ DiagnosedSilenceableFailure mlir::test::TestProduceNullPayloadOp::apply(
   return DiagnosedSilenceableFailure::success();
 }
 
+DiagnosedSilenceableFailure mlir::test::TestProduceEmptyPayloadOp::apply(
+    transform::TransformResults &results, transform::TransformState &state) {
+  results.set(cast<OpResult>(getOut()), {});
+  return DiagnosedSilenceableFailure::success();
+}
+
 void mlir::test::TestProduceNullParamOp::getEffects(
     SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
   transform::producesHandle(getOut(), effects);
@@ -734,6 +746,41 @@ mlir::test::TestTrackedRewriteOp::apply(transform::TransformResults &results,
 }
 
 namespace {
+// Test pattern to replace an operation with a new op.
+class ReplaceWithNewOp : public RewritePattern {
+public:
+  ReplaceWithNewOp(MLIRContext *context)
+      : RewritePattern(MatchAnyOpTypeTag(), /*benefit=*/1, context) {}
+
+  LogicalResult matchAndRewrite(Operation *op,
+                                PatternRewriter &rewriter) const override {
+    auto newName = op->getAttrOfType<StringAttr>("replace_with_new_op");
+    if (!newName)
+      return failure();
+    Operation *newOp = rewriter.create(
+        op->getLoc(), OperationName(newName, op->getContext()).getIdentifier(),
+        op->getOperands(), op->getResultTypes());
+    rewriter.replaceOp(op, newOp->getResults());
+    return success();
+  }
+};
+
+// Test pattern to erase an operation.
+class EraseOp : public RewritePattern {
+public:
+  EraseOp(MLIRContext *context)
+      : RewritePattern("test.erase_op", /*benefit=*/1, context) {}
+  LogicalResult matchAndRewrite(Operation *op,
+                                PatternRewriter &rewriter) const override {
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+void populateTestPatterns(RewritePatternSet &patterns) {
+  patterns.insert<ReplaceWithNewOp, EraseOp>(patterns.getContext());
+}
+
 /// Test extension of the Transform dialect. Registers additional ops and
 /// declares PDL as dependent dialect since the additional ops are using PDL
 /// types for operands and results.
@@ -754,6 +801,28 @@ public:
 #define GET_TYPEDEF_LIST
 #include "TestTransformDialectExtensionTypes.cpp.inc"
         >();
+
+    auto verboseConstraint = [](PatternRewriter &rewriter,
+                                ArrayRef<PDLValue> pdlValues) {
+      for (const PDLValue &pdlValue : pdlValues) {
+        if (Operation *op = pdlValue.dyn_cast<Operation *>()) {
+          op->emitWarning() << "from PDL constraint";
+        }
+      }
+      return success();
+    };
+
+    addDialectDataInitializer<transform::PDLMatchHooks>(
+        [&](transform::PDLMatchHooks &hooks) {
+          llvm::StringMap<PDLConstraintFunction> constraints;
+          constraints.try_emplace("verbose_constraint", verboseConstraint);
+          hooks.mergeInPDLMatchHooks(std::move(constraints));
+        });
+
+    addDialectDataInitializer<transform::PatternRegistry>(
+        [&](transform::PatternRegistry &registry) {
+          registry.registerPatterns("transform.test", populateTestPatterns);
+        });
   }
 };
 } // namespace

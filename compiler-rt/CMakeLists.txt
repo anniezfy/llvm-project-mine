@@ -5,14 +5,16 @@
 
 cmake_minimum_required(VERSION 3.20.0)
 
+set(LLVM_COMMON_CMAKE_UTILS "${CMAKE_CURRENT_SOURCE_DIR}/../cmake")
+include(${LLVM_COMMON_CMAKE_UTILS}/Modules/CMakePolicy.cmake
+  NO_POLICY_SCOPE)
+
 # Check if compiler-rt is built as a standalone project.
 if (CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR OR COMPILER_RT_STANDALONE_BUILD)
   project(CompilerRT C CXX ASM)
   set(COMPILER_RT_STANDALONE_BUILD TRUE)
   set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 endif()
-
-set(LLVM_COMMON_CMAKE_UTILS "${CMAKE_CURRENT_SOURCE_DIR}/../cmake")
 
 # Add path for custom compiler-rt modules.
 list(INSERT CMAKE_MODULE_PATH 0
@@ -736,14 +738,8 @@ if(COMPILER_RT_USE_LIBCXX)
   endif()
 endif()
 
-set(COMPILER_RT_LLD_PATH ${LLVM_MAIN_SRC_DIR}/tools/lld)
-if(EXISTS ${COMPILER_RT_LLD_PATH}/ AND LLVM_TOOL_LLD_BUILD)
+if(COMPILER_RT_HAS_TRUNK_LLD AND LLVM_USE_LINKER STREQUAL "lld")
   set(COMPILER_RT_HAS_LLD TRUE)
-else()
-  set(COMPILER_RT_LLD_PATH ${LLVM_MAIN_SRC_DIR}/../lld)
-  if(EXISTS ${COMPILER_RT_LLD_PATH}/ AND LLVM_TOOL_LLD_BUILD)
-    set(COMPILER_RT_HAS_LLD TRUE)
-  endif()
 endif()
 
 if(ANDROID)

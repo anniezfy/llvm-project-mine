@@ -317,7 +317,10 @@ void ASTStmtWriter::VisitGCCAsmStmt(GCCAsmStmt *S) {
     Record.AddStmt(S->getClobberStringLiteral(I));
 
   // Labels
-  for (auto *E : S->labels()) Record.AddStmt(E);
+  for (unsigned I = 0, N = S->getNumLabels(); I != N; ++I) {
+    Record.AddIdentifierRef(S->getLabelIdentifier(I));
+    Record.AddStmt(S->getLabelExpr(I));
+  }
 
   Code = serialization::STMT_GCCASM;
 }
@@ -1226,6 +1229,7 @@ void ASTStmtWriter::VisitGenericSelectionExpr(GenericSelectionExpr *E) {
   VisitExpr(E);
 
   Record.push_back(E->getNumAssocs());
+  Record.push_back(E->isExprPredicate());
   Record.push_back(E->ResultIndex);
   Record.AddSourceLocation(E->getGenericLoc());
   Record.AddSourceLocation(E->getDefaultLoc());

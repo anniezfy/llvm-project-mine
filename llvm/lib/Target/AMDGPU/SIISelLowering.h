@@ -198,6 +198,7 @@ private:
   SDValue performCvtPkRTZCombine(SDNode *N, DAGCombinerInfo &DCI) const;
   SDValue performExtractVectorEltCombine(SDNode *N, DAGCombinerInfo &DCI) const;
   SDValue performInsertVectorEltCombine(SDNode *N, DAGCombinerInfo &DCI) const;
+  SDValue performFPRoundCombine(SDNode *N, DAGCombinerInfo &DCI) const;
 
   SDValue reassociateScalarOps(SDNode *N, SelectionDAG &DAG) const;
   unsigned getFusedOpcode(const SelectionDAG &DAG,
@@ -250,6 +251,17 @@ private:
   // pointed to by Offsets.
   void setBufferOffsets(SDValue CombinedOffset, SelectionDAG &DAG,
                         SDValue *Offsets, Align Alignment = Align(4)) const;
+
+  // Convert the i128 that an addrspace(8) pointer is natively represented as
+  // into the v4i32 that all the buffer intrinsics expect to receive. We can't
+  // add register classes for i128 on pain of the promotion logic going haywire,
+  // so this slightly ugly hack is what we've got. If passed a non-pointer
+  // argument (as would be seen in older buffer intrinsics), does nothing.
+  SDValue bufferRsrcPtrToVector(SDValue MaybePointer, SelectionDAG &DAG) const;
+
+  // Wrap a 64-bit pointer into a v4i32 (which is how all SelectionDAG code
+  // represents ptr addrspace(8)) using the flags specified in the intrinsic.
+  SDValue lowerPointerAsRsrcIntrin(SDNode *Op, SelectionDAG &DAG) const;
 
   // Handle 8 bit and 16 bit buffer loads
   SDValue handleByteShortBufferLoads(SelectionDAG &DAG, EVT LoadVT, SDLoc DL,

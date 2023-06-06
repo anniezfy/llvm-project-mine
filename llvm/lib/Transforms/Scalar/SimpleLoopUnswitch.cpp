@@ -462,7 +462,7 @@ static void hoistLoopToNewParent(Loop &L, BasicBlock &Preheader,
     // Because we just hoisted a loop out of this one, we have essentially
     // created new exit paths from it. That means we need to form LCSSA PHI
     // nodes for values used in the no-longer-nested loop.
-    formLCSSA(*OldContainingL, DT, &LI);
+    formLCSSA(*OldContainingL, DT, &LI, SE);
 
     // We shouldn't need to form dedicated exits because the exit introduced
     // here is the (just split by unswitching) preheader. However, after trivial
@@ -2535,7 +2535,7 @@ static void unswitchNontrivialInvariants(
     // First build LCSSA for this loop so that we can preserve it when
     // forming dedicated exits. We don't want to perturb some other loop's
     // LCSSA while doing that CFG edit.
-    formLCSSA(UpdateL, DT, &LI);
+    formLCSSA(UpdateL, DT, &LI, SE);
 
     // For loops reached by this loop's original exit blocks we may
     // introduced new, non-dedicated exits. At least try to re-form dedicated
@@ -2655,8 +2655,7 @@ static BranchInst *turnSelectIntoBranch(SelectInst *SI, DominatorTree &DT,
   LLVM_DEBUG(dbgs() << "Turning " << *SI << " into a branch.\n");
   BasicBlock *HeadBB = SI->getParent();
 
-  DomTreeUpdater DTU =
-      DomTreeUpdater(DT, DomTreeUpdater::UpdateStrategy::Eager);
+  DomTreeUpdater DTU(DT, DomTreeUpdater::UpdateStrategy::Eager);
   SplitBlockAndInsertIfThen(SI->getCondition(), SI, false,
                             SI->getMetadata(LLVMContext::MD_prof), &DTU, &LI);
   auto *CondBr = cast<BranchInst>(HeadBB->getTerminator());
@@ -2709,15 +2708,10 @@ static BranchInst *turnGuardIntoBranch(IntrinsicInst *GI, Loop &L,
   if (MSSAU && VerifyMemorySSA)
      MSSAU->getMemorySSA()->verifyMemorySSA();
 
-  // Remove all CheckBB's successors from DomTree. A block can be seen among
-  // successors more than once, but for DomTree it should be added only once.
-  SmallPtrSet<BasicBlock *, 4> Successors;
-  for (auto *Succ : successors(CheckBB))
-    if (Successors.insert(Succ).second)
-      DTUpdates.push_back({DominatorTree::Delete, CheckBB, Succ});
-
+  DomTreeUpdater DTU(DT, DomTreeUpdater::UpdateStrategy::Eager);
   Instruction *DeoptBlockTerm =
-      SplitBlockAndInsertIfThen(GI->getArgOperand(0), GI, true);
+      SplitBlockAndInsertIfThen(GI->getArgOperand(0), GI, true,
+                                GI->getMetadata(LLVMContext::MD_prof), &DTU, &LI);
   BranchInst *CheckBI = cast<BranchInst>(CheckBB->getTerminator());
   // SplitBlockAndInsertIfThen inserts control flow that branches to
   // DeoptBlockTerm if the condition is true.  We want the opposite.
@@ -2733,20 +2727,6 @@ static BranchInst *turnGuardIntoBranch(IntrinsicInst *GI, Loop &L,
 
   GI->moveBefore(DeoptBlockTerm);
   GI->setArgOperand(0, ConstantInt::getFalse(GI->getContext()));
-
-  // Add new successors of CheckBB into DomTree.
-  for (auto *Succ : successors(CheckBB))
-    DTUpdates.push_back({DominatorTree::Insert, CheckBB, Succ});
-
-  // Now the blocks that used to be CheckBB's successors are GuardedBlock's
-  // successors.
-  for (auto *Succ : Successors)
-    DTUpdates.push_back({DominatorTree::Insert, GuardedBlock, Succ});
-
-  // Make proper changes to DT.
-  DT.applyUpdates(DTUpdates);
-  // Inform LI of a new loop block.
-  L.addBasicBlockToLoop(GuardedBlock, LI);
 
   if (MSSAU) {
     MemoryDef *MD = cast<MemoryDef>(MSSAU->getMemorySSA()->getMemoryAccess(GI));

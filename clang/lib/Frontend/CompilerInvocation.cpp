@@ -1801,7 +1801,7 @@ bool CompilerInvocation::ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args,
     Opts.MemoryProfileOutput = MemProfileBasename;
 
   memcpy(Opts.CoverageVersion, "408*", 4);
-  if (Opts.EmitGcovArcs || Opts.EmitGcovNotes) {
+  if (Opts.CoverageNotesFile.size() || Opts.CoverageDataFile.size()) {
     if (Args.hasArg(OPT_coverage_version_EQ)) {
       StringRef CoverageVersion = Args.getLastArgValue(OPT_coverage_version_EQ);
       if (CoverageVersion.size() != 4) {
@@ -2394,9 +2394,9 @@ bool clang::ParseDiagnosticArgs(DiagnosticOptions &Opts, ArgList &Args,
     DiagMask = DiagnosticLevelMask::All;
   Opts.setVerifyIgnoreUnexpected(DiagMask);
   if (Opts.TabStop == 0 || Opts.TabStop > DiagnosticOptions::MaxTabStop) {
-    Opts.TabStop = DiagnosticOptions::DefaultTabStop;
     Diags->Report(diag::warn_ignoring_ftabstop_value)
         << Opts.TabStop << DiagnosticOptions::DefaultTabStop;
+    Opts.TabStop = DiagnosticOptions::DefaultTabStop;
   }
 
   addDiagnosticArgs(Args, OPT_W_Group, OPT_W_value_Group, Opts.Warnings);

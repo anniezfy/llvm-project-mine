@@ -16,6 +16,7 @@
 #include "SourceCode.h"
 #include "URI.h"
 #include "clang-include-cleaner/Analysis.h"
+#include "clang-include-cleaner/IncludeSpeller.h"
 #include "clang-include-cleaner/Record.h"
 #include "clang-include-cleaner/Types.h"
 #include "support/Logger.h"
@@ -199,6 +200,7 @@ std::vector<Diag> generateMissingIncludeDiagnostics(
 
     std::string Spelling =
         spellHeader(AST, MainFile, SymbolWithMissingInclude.Providers.front());
+
     llvm::StringRef HeaderRef{Spelling};
     bool Angled = HeaderRef.starts_with("<");
     // We might suggest insertion of an existing include in edge cases, e.g.,
@@ -218,7 +220,23 @@ std::vector<Diag> generateMissingIncludeDiagnostics(
     D.Source = Diag::DiagSource::Clangd;
     D.File = AST.tuPath();
     D.InsideMainFile = true;
-    D.Severity = DiagnosticsEngine::Warning;
+    // We avoid the "warning" severity here in favor of LSP's "information".
+    //
+    // Users treat most warnings on code being edited as high-priority.
+    // They don't think of include cleanups the same way: they want to edit
+    // lines with existing violations without fixing them.
+    // Diagnostics at the same level tend to be visually indistinguishable,
+    // and a few missing includes can cause many diagnostics.
+    // Marking these as "information" leaves them visible, but less intrusive.
+    //
+    // (These concerns don't apply to unused #include warnings: these are fewer,
+    // they appear on infrequently-edited lines with few other warnings, and
+    // the 'Unneccesary' tag often result in a different rendering)
+    //
+    // Usually clang's "note" severity usually has special semantics, being
+    // translated into LSP RelatedInformation of a parent diagnostic.
+    // But not here: these aren't processed by clangd's DiagnosticConsumer.
+    D.Severity = DiagnosticsEngine::Note;
     D.Range = clangd::Range{
         offsetToPosition(Code,
                          SymbolWithMissingInclude.SymRefRange.beginOffset()),
@@ -319,8 +337,9 @@ convertIncludes(const SourceManager &SM,
 std::string spellHeader(ParsedAST &AST, const FileEntry *MainFile,
                         include_cleaner::Header Provider) {
   if (Provider.kind() == include_cleaner::Header::Physical) {
-    if (auto CanonicalPath = getCanonicalPath(Provider.physical()->getLastRef(),
-                                              AST.getSourceManager())) {
+    if (auto CanonicalPath =
+            getCanonicalPath(Provider.physical()->getLastRef(),
+                             AST.getSourceManager().getFileManager())) {
       std::string SpelledHeader =
           llvm::cantFail(URI::includeSpelling(URI::create(*CanonicalPath)));
       if (!SpelledHeader.empty())
@@ -328,7 +347,7 @@ std::string spellHeader(ParsedAST &AST, const FileEntry *MainFile,
     }
   }
   return include_cleaner::spellHeader(
-      Provider, AST.getPreprocessor().getHeaderSearchInfo(), MainFile);
+      {Provider, AST.getPreprocessor().getHeaderSearchInfo(), MainFile});
 }
 
 std::vector<const Inclusion *>

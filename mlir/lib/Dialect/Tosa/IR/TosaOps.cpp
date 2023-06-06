@@ -154,7 +154,7 @@ LogicalResult tosa::AvgPool2dOp::verify() {
     resultETy = quantType.getStorageType();
 
   auto accType = getAccType();
-  if (inputETy.isa<IntegerType>() && !accType.isInteger(32))
+  if (llvm::isa<IntegerType>(inputETy) && !accType.isInteger(32))
     return emitOpError("accumulator type for integer tensor is not i32");
 
   if ((inputETy.isBF16() || inputETy.isF16()) &&
@@ -984,7 +984,7 @@ static LogicalResult ReduceInferReturnTypes(
       OpaqueProperties properties, RegionRange regions,                        \
       SmallVectorImpl<ShapedTypeComponents> &inferredReturnShapes) {           \
     Type inputType =                                                           \
-        operands.getType()[0].cast<TensorType>().getElementType();             \
+        llvm::cast<TensorType>(operands.getType()[0]).getElementType();        \
     return ReduceInferReturnTypes(operands.getShape(0), inputType,             \
                                   properties.as<Properties *>()->axis,         \
                                   inferredReturnShapes);                       \
@@ -1058,6 +1058,7 @@ NARY_SHAPE_INFER(tosa::RsqrtOp)
 NARY_SHAPE_INFER(tosa::SelectOp)
 NARY_SHAPE_INFER(tosa::SubOp)
 NARY_SHAPE_INFER(tosa::TanhOp)
+NARY_SHAPE_INFER(tosa::ErfOp)
 NARY_SHAPE_INFER(tosa::SigmoidOp)
 #undef PRED_SHAPE_INFER
 
