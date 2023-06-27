@@ -920,6 +920,10 @@ bool CompilerInvocation::createFromArgs(
     res.loweringOpts.setLowerToHighLevelFIR(true);
   }
 
+  if (args.hasArg(clang::driver::options::OPT_flang_experimental_polymorphism)) {
+    res.loweringOpts.setPolymorphicTypeImpl(true);
+  }
+
   success &= parseFrontendArgs(res.getFrontendOpts(), args, diags);
   parseTargetArgs(res.getTargetOpts(), args);
   parsePreprocessorArgs(res.getPreprocessorOpts(), args);
@@ -1107,6 +1111,9 @@ void CompilerInvocation::setSemanticsOpts(
   semanticsContext->targetCharacteristics()
       .set_compilerOptionsString(allCompilerInvocOpts)
       .set_compilerVersionString(version);
+
+  if (targetTriple.isPPC())
+    semanticsContext->targetCharacteristics().set_isPPC(true);
 }
 
 /// Set \p loweringOptions controlling lowering behavior based

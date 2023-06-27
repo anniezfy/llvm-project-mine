@@ -455,6 +455,10 @@ ISD::NodeType ISD::getVecReduceBaseOpcode(unsigned VecReduceOpcode) {
   case ISD::VECREDUCE_FMIN:
   case ISD::VP_REDUCE_FMIN:
     return ISD::FMINNUM;
+  case ISD::VECREDUCE_FMAXIMUM:
+    return ISD::FMAXIMUM;
+  case ISD::VECREDUCE_FMINIMUM:
+    return ISD::FMINIMUM;
   }
 }
 
@@ -923,6 +927,7 @@ static void AddNodeIDCustom(FoldingSetNodeID &ID, const SDNode *N) {
     ID.AddInteger(MN->getRawSubclassData());
     ID.AddInteger(MN->getPointerInfo().getAddrSpace());
     ID.AddInteger(MN->getMemOperand()->getFlags());
+    ID.AddInteger(MN->getMemoryVT().getRawBits());
   }
 }
 
@@ -4977,7 +4982,8 @@ bool SelectionDAG::isKnownNeverNaN(SDValue Op, bool SNaN, unsigned Depth) const 
   case ISD::FROUND:
   case ISD::FROUNDEVEN:
   case ISD::FRINT:
-  case ISD::FNEARBYINT: {
+  case ISD::FNEARBYINT:
+  case ISD::FLDEXP: {
     if (SNaN)
       return true;
     return isKnownNeverNaN(Op.getOperand(0), SNaN, Depth + 1);
@@ -6917,6 +6923,13 @@ SDValue SelectionDAG::getNode(unsigned Opcode, const SDLoc &DL, EVT VT,
     if (N1.getValueType() == VT)
       return N1;
     break;
+  case ISD::VP_TRUNCATE:
+  case ISD::VP_SIGN_EXTEND:
+  case ISD::VP_ZERO_EXTEND:
+    // Don't create noop casts.
+    if (N1.getValueType() == VT)
+      return N1;
+    break;
   }
 
   // Memoize node if it doesn't produce a flag.
@@ -8054,6 +8067,7 @@ SDValue SelectionDAG::getMemIntrinsicNode(unsigned Opcode, const SDLoc &dl,
         Opcode, dl.getIROrder(), VTList, MemVT, MMO));
     ID.AddInteger(MMO->getPointerInfo().getAddrSpace());
     ID.AddInteger(MMO->getFlags());
+    ID.AddInteger(MemVT.getRawBits());
     void *IP = nullptr;
     if (SDNode *E = FindNodeOrInsertPos(ID, dl, IP)) {
       cast<MemIntrinsicSDNode>(E)->refineAlignment(MMO);
@@ -10472,8 +10486,7 @@ void SelectionDAG::salvageDebugInfo(SDNode &N) {
     case ISD::ADD:
       SDValue N0 = N.getOperand(0);
       SDValue N1 = N.getOperand(1);
-      if (!isConstantIntBuildVectorOrConstantInt(N0) &&
-          isConstantIntBuildVectorOrConstantInt(N1)) {
+      if (!isa<ConstantSDNode>(N0) && isa<ConstantSDNode>(N1)) {
         uint64_t Offset = N.getConstantOperandVal(1);
 
         // Rewrite an ADD constant node into a DIExpression. Since we are
@@ -12393,6 +12406,18 @@ SDValue SelectionDAG::getNeutralElement(unsigned Opcode, const SDLoc &DL,
 
     return getConstantFP(NeutralAF, DL, VT);
   }
+  case ISD::FMINIMUM:
+  case ISD::FMAXIMUM: {
+    // Neutral element for fminimum is Inf or FLT_MAX, depending on FMF.
+    const fltSemantics &Semantics = EVTToAPFloatSemantics(VT);
+    APFloat NeutralAF = !Flags.hasNoInfs() ? APFloat::getInf(Semantics)
+                                           : APFloat::getLargest(Semantics);
+    if (Opcode == ISD::FMAXIMUM)
+      NeutralAF.changeSign();
+
+    return getConstantFP(NeutralAF, DL, VT);
+  }
+
   }
 }
 

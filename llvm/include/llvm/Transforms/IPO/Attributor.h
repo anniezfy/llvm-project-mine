@@ -115,6 +115,7 @@
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/IR/AbstractCallSite.h"
+#include "llvm/IR/Attributes.h"
 #include "llvm/IR/ConstantRange.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/InstIterator.h"
@@ -127,6 +128,7 @@
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/DOTGraphTraits.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/ModRef.h"
 #include "llvm/Support/TimeProfiler.h"
 #include "llvm/TargetParser/Triple.h"
 #include "llvm/Transforms/Utils/CallGraphUpdater.h"
@@ -706,7 +708,8 @@ struct IRPosition {
       // function.
       if (Argument *Arg = getAssociatedArgument())
         return Arg->getParent();
-      return CB->getCalledFunction();
+      return dyn_cast_if_present<Function>(
+          CB->getCalledOperand()->stripPointerCasts());
     }
     return getAnchorScope();
   }
@@ -1125,25 +1128,42 @@ struct AnalysisGetter {
   template <typename, typename = void> static constexpr bool HasLegacyWrapper = false;
 
   template <typename Analysis>
-  typename Analysis::Result *getAnalysis(const Function &F) {
-    if (FAM)
+  typename Analysis::Result *getAnalysis(const Function &F,
+                                         bool RequestCachedOnly = false) {
+    if (!LegacyPass && !FAM)
+      return nullptr;
+    if (FAM) {
+      if (CachedOnly || RequestCachedOnly)
+        return FAM->getCachedResult<Analysis>(const_cast<Function &>(F));
       return &FAM->getResult<Analysis>(const_cast<Function &>(F));
-    if constexpr (HasLegacyWrapper<Analysis>)
-      if (LegacyPass)
+    }
+    if constexpr (HasLegacyWrapper<Analysis>) {
+      if (!CachedOnly && !RequestCachedOnly)
         return &LegacyPass
                     ->getAnalysis<typename Analysis::LegacyWrapper>(
                         const_cast<Function &>(F))
                     .getResult();
+      if (auto *P =
+              LegacyPass
+                  ->getAnalysisIfAvailable<typename Analysis::LegacyWrapper>())
+        return &P->getResult();
+    }
     return nullptr;
   }
 
-  AnalysisGetter(FunctionAnalysisManager &FAM) : FAM(&FAM) {}
-  AnalysisGetter(Pass *P) : LegacyPass(P) {}
+  AnalysisGetter(FunctionAnalysisManager &FAM, bool CachedOnly = false)
+      : FAM(&FAM), CachedOnly(CachedOnly) {}
+  AnalysisGetter(Pass *P, bool CachedOnly = false)
+      : LegacyPass(P), CachedOnly(CachedOnly) {}
   AnalysisGetter() = default;
 
 private:
   FunctionAnalysisManager *FAM = nullptr;
   Pass *LegacyPass = nullptr;
+
+  /// If \p CachedOnly is true, no pass is created, just existing results are
+  /// used. Also available per request.
+  bool CachedOnly = false;
 };
 
 template <typename Analysis>
@@ -1164,24 +1184,26 @@ constexpr bool AnalysisGetter::HasLegacyWrapper<
 /// instance down in the abstract attributes.
 struct InformationCache {
   InformationCache(const Module &M, AnalysisGetter &AG,
-                   BumpPtrAllocator &Allocator, SetVector<Function *> *CGSCC)
-      : DL(M.getDataLayout()), Allocator(Allocator),
-        Explorer(
-            /* ExploreInterBlock */ true, /* ExploreCFGForward */ true,
-            /* ExploreCFGBackward */ true,
-            /* LIGetter */
-            [&](const Function &F) { return AG.getAnalysis<LoopAnalysis>(F); },
-            /* DTGetter */
-            [&](const Function &F) {
-              return AG.getAnalysis<DominatorTreeAnalysis>(F);
-            },
-            /* PDTGetter */
-            [&](const Function &F) {
-              return AG.getAnalysis<PostDominatorTreeAnalysis>(F);
-            }),
-        AG(AG), TargetTriple(M.getTargetTriple()) {
+                   BumpPtrAllocator &Allocator, SetVector<Function *> *CGSCC,
+                   bool UseExplorer = true)
+      : DL(M.getDataLayout()), Allocator(Allocator), AG(AG),
+        TargetTriple(M.getTargetTriple()) {
     if (CGSCC)
       initializeModuleSlice(*CGSCC);
+    if (UseExplorer)
+      Explorer = new (Allocator) MustBeExecutedContextExplorer(
+          /* ExploreInterBlock */ true, /* ExploreCFGForward */ true,
+          /* ExploreCFGBackward */ true,
+          /* LIGetter */
+          [&](const Function &F) { return AG.getAnalysis<LoopAnalysis>(F); },
+          /* DTGetter */
+          [&](const Function &F) {
+            return AG.getAnalysis<DominatorTreeAnalysis>(F);
+          },
+          /* PDTGetter */
+          [&](const Function &F) {
+            return AG.getAnalysis<PostDominatorTreeAnalysis>(F);
+          });
   }
 
   ~InformationCache() {
@@ -1193,6 +1215,8 @@ struct InformationCache {
     using AA::InstExclusionSetTy;
     for (auto *BES : BESets)
       BES->~InstExclusionSetTy();
+    if (Explorer)
+      Explorer->~MustBeExecutedContextExplorer();
   }
 
   /// Apply \p CB to all uses of \p F. If \p LookThroughConstantExprUses is
@@ -1234,7 +1258,8 @@ struct InformationCache {
 
       for (Instruction &I : instructions(*F))
         if (auto *CB = dyn_cast<CallBase>(&I))
-          if (Function *Callee = CB->getCalledFunction())
+          if (auto *Callee =
+                  dyn_cast_if_present<Function>(CB->getCalledOperand()))
             if (Seen.insert(Callee).second)
               Worklist.push_back(Callee);
     }
@@ -1275,7 +1300,7 @@ struct InformationCache {
   }
 
   /// Return MustBeExecutedContextExplorer
-  MustBeExecutedContextExplorer &getMustBeExecutedContextExplorer() {
+  MustBeExecutedContextExplorer *getMustBeExecutedContextExplorer() {
     return Explorer;
   }
 
@@ -1283,9 +1308,6 @@ struct InformationCache {
   TargetLibraryInfo *getTargetLibraryInfoForFunction(const Function &F) {
     return AG.getAnalysis<TargetLibraryAnalysis>(F);
   }
-
-  /// Return AliasAnalysis Result for function \p F.
-  AAResults *getAAResultsForFunction(const Function &F);
 
   /// Return true if \p Arg is involved in a must-tail call, thus the argument
   /// of the caller or callee.
@@ -1300,8 +1322,9 @@ struct InformationCache {
 
   /// Return the analysis result from a pass \p AP for function \p F.
   template <typename AP>
-  typename AP::Result *getAnalysisResultForFunction(const Function &F) {
-    return AG.getAnalysis<AP>(F);
+  typename AP::Result *getAnalysisResultForFunction(const Function &F,
+                                                    bool CachedOnly = false) {
+    return AG.getAnalysis<AP>(F, CachedOnly);
   }
 
   /// Return datalayout used in the module.
@@ -1381,7 +1404,7 @@ private:
   BumpPtrAllocator &Allocator;
 
   /// MustBeExecutedContextExplorer
-  MustBeExecutedContextExplorer Explorer;
+  MustBeExecutedContextExplorer *Explorer = nullptr;
 
   /// A map with knowledge retained in `llvm.assume` instructions.
   RetainedKnowledgeMap KnowledgeMap;
@@ -1526,7 +1549,7 @@ struct Attributor {
   /// attribute is used for reasoning. To record the dependences explicitly use
   /// the `Attributor::recordDependence` method.
   template <typename AAType>
-  const AAType &getAAFor(const AbstractAttribute &QueryingAA,
+  const AAType *getAAFor(const AbstractAttribute &QueryingAA,
                          const IRPosition &IRP, DepClassTy DepClass) {
     return getOrCreateAAFor<AAType>(IRP, &QueryingAA, DepClass,
                                     /* ForceUpdate */ false);
@@ -1538,7 +1561,7 @@ struct Attributor {
   /// possible/useful that were not happening before as the abstract attribute
   /// was assumed dead.
   template <typename AAType>
-  const AAType &getAndUpdateAAFor(const AbstractAttribute &QueryingAA,
+  const AAType *getAndUpdateAAFor(const AbstractAttribute &QueryingAA,
                                   const IRPosition &IRP, DepClassTy DepClass) {
     return getOrCreateAAFor<AAType>(IRP, &QueryingAA, DepClass,
                                     /* ForceUpdate */ true);
@@ -1550,7 +1573,7 @@ struct Attributor {
   /// function.
   /// NOTE: ForceUpdate is ignored in any stage other than the update stage.
   template <typename AAType>
-  const AAType &getOrCreateAAFor(IRPosition IRP,
+  const AAType *getOrCreateAAFor(IRPosition IRP,
                                  const AbstractAttribute *QueryingAA,
                                  DepClassTy DepClass, bool ForceUpdate = false,
                                  bool UpdateAfterInit = true) {
@@ -1561,7 +1584,7 @@ struct Attributor {
                                             /* AllowInvalidState */ true)) {
       if (ForceUpdate && Phase == AttributorPhase::UPDATE)
         updateAA(*AAPtr);
-      return *AAPtr;
+      return AAPtr;
     }
 
     // No matching attribute found, create one.
@@ -1575,7 +1598,7 @@ struct Attributor {
     // If we are currenty seeding attributes, enforce seeding rules.
     if (Phase == AttributorPhase::SEEDING && !shouldSeedAttribute(AA)) {
       AA.getState().indicatePessimisticFixpoint();
-      return AA;
+      return &AA;
     }
 
     // For now we ignore naked and optnone functions.
@@ -1597,11 +1620,14 @@ struct Attributor {
     // Allowed we will not perform updates at all.
     if (Invalidate) {
       AA.getState().indicatePessimisticFixpoint();
-      return AA;
+      return &AA;
     }
 
     {
-      TimeTraceScope TimeScope(AA.getName() + "::initialize");
+      TimeTraceScope TimeScope("initialize", [&]() {
+        return AA.getName() +
+               std::to_string(AA.getIRPosition().getPositionKind());
+      });
       ++InitializationChainLength;
       AA.initialize(*this);
       --InitializationChainLength;
@@ -1612,7 +1638,7 @@ struct Attributor {
     if ((AnchorFn && !isRunOn(const_cast<Function *>(AnchorFn))) &&
         !isRunOn(IRP.getAssociatedFunction())) {
       AA.getState().indicatePessimisticFixpoint();
-      return AA;
+      return &AA;
     }
 
     // If this is queried in the manifest stage, we force the AA to indicate
@@ -1620,7 +1646,7 @@ struct Attributor {
     if (Phase == AttributorPhase::MANIFEST ||
         Phase == AttributorPhase::CLEANUP) {
       AA.getState().indicatePessimisticFixpoint();
-      return AA;
+      return &AA;
     }
 
     // Allow seeded attributes to declare dependencies.
@@ -1637,10 +1663,11 @@ struct Attributor {
     if (QueryingAA && AA.getState().isValidState())
       recordDependence(AA, const_cast<AbstractAttribute &>(*QueryingAA),
                        DepClass);
-    return AA;
+    return &AA;
   }
+
   template <typename AAType>
-  const AAType &getOrCreateAAFor(const IRPosition &IRP) {
+  const AAType *getOrCreateAAFor(const IRPosition &IRP) {
     return getOrCreateAAFor<AAType>(IRP, /* QueryingAA */ nullptr,
                                     DepClassTy::NONE);
   }
@@ -2624,12 +2651,12 @@ struct BitIntegerState
   BitIntegerState(base_t Assumed) : super(Assumed) {}
 
   /// Return true if the bits set in \p BitsEncoding are "known bits".
-  bool isKnown(base_t BitsEncoding) const {
+  bool isKnown(base_t BitsEncoding = BestState) const {
     return (this->Known & BitsEncoding) == BitsEncoding;
   }
 
   /// Return true if the bits set in \p BitsEncoding are "assumed bits".
-  bool isAssumed(base_t BitsEncoding) const {
+  bool isAssumed(base_t BitsEncoding = BestState) const {
     return (this->Assumed & BitsEncoding) == BitsEncoding;
   }
 
@@ -3070,12 +3097,18 @@ template <Attribute::AttrKind AK, typename BaseType>
 struct IRAttribute : public BaseType {
   IRAttribute(const IRPosition &IRP) : BaseType(IRP) {}
 
+  static bool isImpliedByIR(Attributor &A, const IRPosition &IRP,
+                            ArrayRef<Attribute::AttrKind> AttrKinds,
+                            bool IgnoreSubsumingPositions = false) {
+    if (isa<UndefValue>(IRP.getAssociatedValue()))
+      return true;
+    return IRP.hasAttr(AttrKinds, IgnoreSubsumingPositions, &A);
+  }
+
   /// See AbstractAttribute::initialize(...).
   void initialize(Attributor &A) override {
     const IRPosition &IRP = this->getIRPosition();
-    if (isa<UndefValue>(IRP.getAssociatedValue()) ||
-        this->hasAttr(getAttrKind(), /* IgnoreSubsumingPositions */ false,
-                      &A)) {
+    if (isImpliedByIR(A, IRP, getAttrKind())) {
       this->getState().indicateOptimisticFixpoint();
       return;
     }
@@ -3509,6 +3542,33 @@ struct AAWillReturn
                          StateWrapper<BooleanState, AbstractAttribute>> {
   AAWillReturn(const IRPosition &IRP, Attributor &A) : IRAttribute(IRP) {}
 
+  static bool isImpliedByIR(Attributor &A, const IRPosition &IRP,
+                            ArrayRef<Attribute::AttrKind> AttrKinds,
+                            bool IgnoreSubsumingPositions = false) {
+    if (IRAttribute::isImpliedByIR(A, IRP, AttrKinds, IgnoreSubsumingPositions))
+      return true;
+    return isImpliedByMustprogressAndReadonly(A, IRP, /* KnownOnly */ true);
+  }
+
+  /// Check for `mustprogress` and `readonly` as they imply `willreturn`.
+  static bool isImpliedByMustprogressAndReadonly(Attributor &A,
+                                                 const IRPosition &IRP,
+                                                 bool KnownOnly) {
+    // Check for `mustprogress` in the scope and the associated function which
+    // might be different if this is a call site.
+    if (!IRAttribute::isImpliedByIR(A, IRP, {Attribute::MustProgress}))
+      return false;
+
+    SmallVector<Attribute, 1> Attrs;
+    IRP.getAttrs({Attribute::Memory}, Attrs,
+                 /* IgnoreSubsumingPositions */ false);
+
+    MemoryEffects ME = MemoryEffects::unknown();
+    for (const Attribute &Attr : Attrs)
+      ME &= Attr.getMemoryEffects();
+    return ME.onlyReadsMemory();
+  }
+
   /// Return true if "willreturn" is assumed.
   bool isAssumedWillReturn() const { return getAssumed(); }
 
@@ -3609,6 +3669,22 @@ struct AANoAlias
     : public IRAttribute<Attribute::NoAlias,
                          StateWrapper<BooleanState, AbstractAttribute>> {
   AANoAlias(const IRPosition &IRP, Attributor &A) : IRAttribute(IRP) {}
+
+  static bool isImpliedByIR(Attributor &A, const IRPosition &IRP,
+                            ArrayRef<Attribute::AttrKind> AttrKinds,
+                            bool IgnoreSubsumingPositions = false) {
+    if (IRAttribute::isImpliedByIR(A, IRP, AttrKinds))
+      return true;
+
+    Value &Val = IRP.getAnchorValue();
+    if (isa<AllocaInst>(Val))
+      return true;
+    if (isa<ConstantPointerNull>(Val) &&
+        !NullPointerIsDefined(IRP.getAnchorScope(),
+                              Val.getType()->getPointerAddressSpace()))
+      return true;
+    return false;
+  }
 
   /// Return true if we assume that the underlying value is alias.
   bool isAssumedNoAlias() const { return getAssumed(); }
@@ -5728,6 +5804,42 @@ enum AttributorRunOption {
   CGSCC = 1 << 1,
   ALL = MODULE | CGSCC
 };
+
+namespace AA {
+/// Helper to avoid creating an AA for IR Attributes that might already be set.
+template <Attribute::AttrKind AK>
+bool hasAssumedIRAttr(Attributor &A, const AbstractAttribute &QueryingAA,
+                      const IRPosition &IRP, DepClassTy DepClass, bool &IsKnown,
+                      bool IgnoreSubsumingPositions = false) {
+  IsKnown = false;
+  switch (AK) {
+#define CASE(ATTRNAME, AANAME, ...)                                            \
+  case Attribute::ATTRNAME: {                                                  \
+    if (AANAME::isImpliedByIR(A, IRP, {AK}, IgnoreSubsumingPositions))         \
+      return IsKnown = true;                                                   \
+    const auto *AA = A.getAAFor<AANAME>(QueryingAA, IRP, DepClass);            \
+    if (!AA || !AA->isAssumed(__VA_ARGS__))                                    \
+      return false;                                                            \
+    IsKnown = AA->isKnown(__VA_ARGS__);                                        \
+    return true;                                                               \
+  }
+    CASE(NoUnwind, AANoUnwind, );
+    CASE(WillReturn, AAWillReturn, );
+    CASE(NoFree, AANoFree, );
+    CASE(NoCapture, AANoCapture, );
+    CASE(NoRecurse, AANoRecurse, );
+    CASE(NoSync, AANoSync, );
+    CASE(NoAlias, AANoAlias, );
+    CASE(MustProgress, AAMustProgress, );
+    CASE(ReadNone, AAMemoryBehavior, AAMemoryBehavior::NO_ACCESSES);
+    CASE(ReadOnly, AAMemoryBehavior, AAMemoryBehavior::NO_WRITES);
+    CASE(WriteOnly, AAMemoryBehavior, AAMemoryBehavior::NO_READS);
+#undef CASE
+  default:
+    llvm_unreachable("hasAssumedIRAttr not available for this attribute kind");
+  };
+}
+} // namespace AA
 
 } // end namespace llvm
 

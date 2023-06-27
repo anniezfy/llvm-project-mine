@@ -880,8 +880,15 @@ Instruction *InstCombinerImpl::foldAddWithConstant(BinaryOperator &Add) {
     return SelectInst::Create(X, InstCombiner::SubOne(Op1C), Op1);
 
   // ~X + C --> (C-1) - X
-  if (match(Op0, m_Not(m_Value(X))))
-    return BinaryOperator::CreateSub(InstCombiner::SubOne(Op1C), X);
+  if (match(Op0, m_Not(m_Value(X)))) {
+    // ~X + C has NSW and (C-1) won't oveflow => (C-1)-X can have NSW
+    auto *COne = ConstantInt::get(Op1C->getType(), 1);
+    bool WillNotSOV = willNotOverflowSignedSub(Op1C, COne, Add);
+    BinaryOperator *Res =
+        BinaryOperator::CreateSub(ConstantExpr::getSub(Op1C, COne), X);
+    Res->setHasNoSignedWrap(Add.hasNoSignedWrap() && WillNotSOV);
+    return Res;
+  }
 
   // (iN X s>> (N - 1)) + 1 --> zext (X > -1)
   const APInt *C;
@@ -1375,6 +1382,9 @@ Instruction *InstCombinerImpl::visitAdd(BinaryOperator &I) {
 
   if (Instruction *X = foldNoWrapAdd(I, Builder))
     return X;
+
+  if (Instruction *R = foldBinOpShiftWithShift(I))
+    return R;
 
   Value *LHS = I.getOperand(0), *RHS = I.getOperand(1);
   Type *Ty = I.getType();

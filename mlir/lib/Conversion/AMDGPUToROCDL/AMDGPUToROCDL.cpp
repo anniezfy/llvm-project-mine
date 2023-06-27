@@ -213,7 +213,7 @@ struct RawBufferOpLowering : public ConvertOpToLLVMPattern<GpuOp> {
     //  none, 3 = either swizzles or testing against offset field) RDNA only
     // bits 30-31: Type (must be 0)
     uint32_t word3 = (7 << 12) | (4 << 15);
-    if (chipset.majorVersion == 10) {
+    if (chipset.majorVersion >= 10) {
       word3 |= (1 << 24);
       uint32_t oob = adaptor.getBoundsCheck() ? 3 : 2;
       word3 |= (oob << 28);
@@ -539,14 +539,6 @@ struct ConvertAMDGPUToROCDLPass
 void mlir::populateAMDGPUToROCDLConversionPatterns(LLVMTypeConverter &converter,
                                                    RewritePatternSet &patterns,
                                                    Chipset chipset) {
-  // ROCDL supports fp8 types in some contexts, but there is no LLVM-level f8
-  // type. Therefore, for this target, declare f8 to be equal to i8.
-  converter.addConversion([](FloatType type) -> std::optional<Type> {
-    if (type.isFloat8E5M2FNUZ() || type.isFloat8E4M3FNUZ())
-      return IntegerType::get(type.getContext(), 8);
-    return std::nullopt;
-  });
-
   patterns.add<LDSBarrierOpLowering>(converter);
   patterns.add<
       RawBufferOpLowering<RawBufferLoadOp, ROCDL::RawBufferLoadOp>,

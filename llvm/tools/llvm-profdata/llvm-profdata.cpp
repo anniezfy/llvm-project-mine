@@ -23,6 +23,7 @@
 #include "llvm/ProfileData/RawMemProfReader.h"
 #include "llvm/ProfileData/SampleProfReader.h"
 #include "llvm/ProfileData/SampleProfWriter.h"
+#include "llvm/Support/BalancedPartitioning.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Discriminator.h"
 #include "llvm/Support/Errc.h"
@@ -593,7 +594,7 @@ adjustInstrProfile(std::unique_ptr<WriterContext> &WC,
 
   auto checkSampleProfileHasFUnique = [&Reader]() {
     for (const auto &PD : Reader->getProfiles()) {
-      auto &FContext = PD.first;
+      auto &FContext = PD.second.getContext();
       if (FContext.toString().find(FunctionSamples::UniqSuffix) !=
           std::string::npos) {
         return true;
@@ -2832,7 +2833,8 @@ static int showSampleProfile(const std::string &Filename, bool ShowCounts,
           "be printed");
 
     // TODO: parse context string to support filtering by contexts.
-    Reader->dumpFunctionProfile(StringRef(ShowFunction), OS);
+    FunctionSamples *FS = Reader->getSamplesFor(StringRef(ShowFunction));
+    Reader->dumpFunctionProfile(FS ? *FS : FunctionSamples(), OS);
   }
 
   if (ShowProfileSymbolList) {
@@ -3038,6 +3040,61 @@ static int show_main(int argc, const char *argv[]) {
   return showMemProfProfile(Filename, ProfiledBinary, SFormat, OS);
 }
 
+static int order_main(int argc, const char *argv[]) {
+  cl::opt<std::string> Filename(cl::Positional, cl::desc("<profdata-file>"));
+  cl::opt<std::string> OutputFilename("output", cl::value_desc("output"),
+                                      cl::init("-"), cl::desc("Output file"));
+  cl::alias OutputFilenameA("o", cl::desc("Alias for --output"),
+                            cl::aliasopt(OutputFilename));
+  cl::ParseCommandLineOptions(argc, argv, "LLVM profile data order\n");
+
+  std::error_code EC;
+  raw_fd_ostream OS(OutputFilename.data(), EC, sys::fs::OF_TextWithCRLF);
+  if (EC)
+    exitWithErrorCode(EC, OutputFilename);
+  auto FS = vfs::getRealFileSystem();
+  auto ReaderOrErr = InstrProfReader::create(Filename, *FS);
+  if (Error E = ReaderOrErr.takeError())
+    exitWithError(std::move(E), Filename);
+
+  auto Reader = std::move(ReaderOrErr.get());
+  for (auto &I : *Reader) {
+    // Read all entries
+    (void)I;
+  }
+  auto &Traces = Reader->getTemporalProfTraces();
+  auto Nodes = TemporalProfTraceTy::createBPFunctionNodes(Traces);
+  BalancedPartitioningConfig Config;
+  BalancedPartitioning BP(Config);
+  BP.run(Nodes);
+
+  WithColor::note() << "# Ordered " << Nodes.size() << " functions\n";
+  for (auto &N : Nodes) {
+    auto FuncName = Reader->getSymtab().getFuncName(N.Id);
+    if (FuncName.contains(':')) {
+      // GlobalValue::getGlobalIdentifier() prefixes the filename if the symbol
+      // is local. This logic will break if there is a colon in the filename,
+      // but we cannot use rsplit() because ObjC symbols can have colons.
+      auto [Filename, ParsedFuncName] = FuncName.split(':');
+      // Emit a comment describing where this symbol came from
+      OS << "# " << Filename << "\n";
+      FuncName = ParsedFuncName;
+    }
+    OS << FuncName << "\n";
+  }
+  return 0;
+}
+
+typedef int (*llvm_profdata_subcommand)(int, const char *[]);
+
+static std::tuple<StringRef, llvm_profdata_subcommand>
+    llvm_profdata_subcommands[] = {
+        {"merge", merge_main},
+        {"show", show_main},
+        {"order", order_main},
+        {"overlap", overlap_main},
+};
+
 int llvm_profdata_main(int argc, char **argvNonConst,
                        const llvm::ToolContext &) {
   const char **argv = const_cast<const char **>(argvNonConst);
@@ -3045,14 +3102,11 @@ int llvm_profdata_main(int argc, char **argvNonConst,
 
   StringRef ProgName(sys::path::filename(argv[0]));
   if (argc > 1) {
-    int (*func)(int, const char *[]) = nullptr;
 
-    if (strcmp(argv[1], "merge") == 0)
-      func = merge_main;
-    else if (strcmp(argv[1], "show") == 0)
-      func = show_main;
-    else if (strcmp(argv[1], "overlap") == 0)
-      func = overlap_main;
+    llvm_profdata_subcommand func = nullptr;
+    for (auto [subcmd_name, subcmd_action] : llvm_profdata_subcommands)
+      if (subcmd_name == argv[1])
+        func = subcmd_action;
 
     if (func) {
       std::string Invocation(ProgName.str() + " " + argv[1]);
@@ -3067,7 +3121,11 @@ int llvm_profdata_main(int argc, char **argvNonConst,
              << "USAGE: " << ProgName << " <command> [args...]\n"
              << "USAGE: " << ProgName << " <command> -help\n\n"
              << "See each individual command --help for more details.\n"
-             << "Available commands: merge, show, overlap\n";
+             << "Available commands: "
+             << join(map_range(llvm_profdata_subcommands,
+                               [](auto const &KV) { return std::get<0>(KV); }),
+                     ", ")
+             << "\n";
       return 0;
     }
 
@@ -3083,6 +3141,10 @@ int llvm_profdata_main(int argc, char **argvNonConst,
   else
     errs() << ProgName << ": Unknown command!\n";
 
-  errs() << "USAGE: " << ProgName << " <merge|show|overlap> [args...]\n";
+  errs() << "USAGE: " << ProgName << " <"
+         << join(map_range(llvm_profdata_subcommands,
+                           [](auto const &KV) { return std::get<0>(KV); }),
+                 "|")
+         << "> [args...]\n";
   return 1;
 }

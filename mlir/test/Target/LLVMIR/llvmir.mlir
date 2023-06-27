@@ -1,5 +1,21 @@
 // RUN: mlir-translate -mlir-to-llvmir -split-input-file %s | FileCheck %s
 
+
+// Comdat sections
+llvm.comdat @__llvm_comdat {
+  // CHECK: $any = comdat any
+  llvm.comdat_selector @any any
+  // CHECK: $exactmatch = comdat exactmatch
+  llvm.comdat_selector @exactmatch exactmatch
+  // CHECK: $largest = comdat largest
+  llvm.comdat_selector @largest largest
+  // CHECK: $nodeduplicate = comdat nodeduplicate
+  llvm.comdat_selector @nodeduplicate nodeduplicate
+  // CHECK: $samesize = comdat samesize
+  llvm.comdat_selector @samesize samesize
+}
+
+
 // CHECK: @global_aligned32 = private global i64 42, align 32
 "llvm.mlir.global"() ({}) {sym_name = "global_aligned32", global_type = i64, value = 42 : i64, linkage = #llvm.linkage<private>, alignment = 32} : () -> ()
 
@@ -38,6 +54,21 @@ llvm.mlir.global internal constant @string_const("foobar") : !llvm.array<6 x i8>
 
 // CHECK: @int_global_undef = internal global i64 undef
 llvm.mlir.global internal @int_global_undef() : i64
+
+// CHECK: @f8E4M3FN_global_as_i8 = internal global i8 60
+llvm.mlir.global internal @f8E4M3FN_global_as_i8(1.5 : f8E4M3FN) : i8
+
+// CHECK: @f8E5M2_global_as_i8 = internal global i8 62
+llvm.mlir.global internal @f8E5M2_global_as_i8(1.5 : f8E5M2) : i8
+
+// CHECK: @f8E4M3FNUZ_global_as_i8 = internal global i8 68
+llvm.mlir.global internal @f8E4M3FNUZ_global_as_i8(1.5 : f8E4M3FNUZ) : i8
+
+// CHECK: @f8E5M2FNUZ_global_as_i8 = internal global i8 66
+llvm.mlir.global internal @f8E5M2FNUZ_global_as_i8(1.5 : f8E5M2FNUZ) : i8
+
+// CHECK: @f8E4M3B11FNUZ_global_as_i8 = internal global i8 92
+llvm.mlir.global internal @f8E4M3B11FNUZ_global_as_i8(1.5 : f8E4M3B11FNUZ) : i8
 
 // CHECK: @explicit_undef = global i32 undef
 llvm.mlir.global external @explicit_undef() : i32 {
@@ -152,6 +183,20 @@ llvm.mlir.global thread_local @has_thr_local(42 : i64) : i64
 
 // CHECK: @sectionvar = internal constant [10 x i8] c"teststring", section ".mysection"
 llvm.mlir.global internal constant @sectionvar("teststring")  {section = ".mysection"}: !llvm.array<10 x i8>
+
+//
+// Comdat attribute.
+//
+// CHECK: @has_any_comdat = internal constant i64 1, comdat($any)
+llvm.mlir.global internal constant @has_any_comdat(1 : i64) comdat(@__llvm_comdat::@any) : i64
+// CHECK: @has_exactmatch_comdat = internal constant i64 1, comdat($exactmatch)
+llvm.mlir.global internal constant @has_exactmatch_comdat(1 : i64) comdat(@__llvm_comdat::@exactmatch) : i64
+// CHECK: @has_largest_comdat = internal constant i64 1, comdat($largest)
+llvm.mlir.global internal constant @has_largest_comdat(1 : i64) comdat(@__llvm_comdat::@largest) : i64
+// CHECK: @has_nodeduplicate_comdat = internal constant i64 1, comdat($nodeduplicate)
+llvm.mlir.global internal constant @has_nodeduplicate_comdat(1 : i64) comdat(@__llvm_comdat::@nodeduplicate) : i64
+// CHECK: @has_samesize_comdat = internal constant i64 1, comdat($samesize)
+llvm.mlir.global internal constant @has_samesize_comdat(1 : i64) comdat(@__llvm_comdat::@samesize) : i64
 
 //
 // Declarations of the allocation functions to be linked against. These are
@@ -2034,12 +2079,11 @@ llvm.func @aliasScope(%arg1 : !llvm.ptr) {
   %2 = llvm.atomicrmw add %arg1, %0 monotonic {alias_scopes = [@metadata::@scope3], noalias_scopes = [@metadata::@scope1, @metadata::@scope2]} : !llvm.ptr, i32
   // CHECK:  cmpxchg {{.*}}, !alias.scope ![[SCOPES3]]
   %3 = llvm.cmpxchg %arg1, %1, %2 acq_rel monotonic {alias_scopes = [@metadata::@scope3]} : !llvm.ptr, i32
-  %4 = llvm.mlir.constant(0 : i1) : i1
   %5 = llvm.mlir.constant(42 : i8) : i8
   // CHECK:  llvm.memcpy{{.*}}, !alias.scope ![[SCOPES3]]
-  "llvm.intr.memcpy"(%arg1, %arg1, %0, %4) {alias_scopes = [@metadata::@scope3]} : (!llvm.ptr, !llvm.ptr, i32, i1) -> ()
+  "llvm.intr.memcpy"(%arg1, %arg1, %0) <{isVolatile = false}> {alias_scopes = [@metadata::@scope3]} : (!llvm.ptr, !llvm.ptr, i32) -> ()
   // CHECK:  llvm.memset{{.*}}, !noalias ![[SCOPES3]]
-  "llvm.intr.memset"(%arg1, %5, %0, %4) {noalias_scopes = [@metadata::@scope3]} : (!llvm.ptr, i8, i32, i1) -> ()
+  "llvm.intr.memset"(%arg1, %5, %0) <{isVolatile = false}> {noalias_scopes = [@metadata::@scope3]} : (!llvm.ptr, i8, i32) -> ()
   // CHECK: call void @foo({{.*}} !alias.scope ![[SCOPES3]]
   llvm.call @foo(%arg1) {alias_scopes = [@metadata::@scope3]} : (!llvm.ptr) -> ()
   // CHECK: call void @foo({{.*}} !noalias ![[SCOPES3]]

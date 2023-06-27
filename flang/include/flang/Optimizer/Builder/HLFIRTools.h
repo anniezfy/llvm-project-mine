@@ -358,16 +358,23 @@ std::pair<mlir::Value, mlir::Value> genVariableFirBaseShapeAndParams(
 /// input entity type if it is scalar. Will crash if the entity is not a
 /// variable.
 mlir::Type getVariableElementType(hlfir::Entity variable);
+/// Get the entity type for an element of an array entity. Returns the
+/// input type if it is a scalar. If the entity is a variable, this
+/// is like getVariableElementType, otherwise, this will return a value
+/// type (that may be an hlfir.expr type).
+mlir::Type getEntityElementType(hlfir::Entity entity);
 
 using ElementalKernelGenerator = std::function<hlfir::Entity(
     mlir::Location, fir::FirOpBuilder &, mlir::ValueRange)>;
 /// Generate an hlfir.elementalOp given call back to generate the element
 /// value at for each iteration.
+/// If exprType is specified, this will be the return type of the elemental op
 hlfir::ElementalOp genElementalOp(mlir::Location loc,
                                   fir::FirOpBuilder &builder,
                                   mlir::Type elementType, mlir::Value shape,
                                   mlir::ValueRange typeParams,
-                                  const ElementalKernelGenerator &genKernel);
+                                  const ElementalKernelGenerator &genKernel,
+                                  mlir::Type exprType = mlir::Type{});
 
 /// Structure to describe a loop nest.
 struct LoopNest {
