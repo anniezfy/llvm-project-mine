@@ -57,6 +57,14 @@ kDevNull = "/dev/null"
 kPdbgRegex = "%dbg\\(([^)'\"]*)\\)(.*)"
 
 
+def buildPdbgCommand(msg, cmd):
+    res = f"%dbg({msg}) {cmd}"
+    assert re.fullmatch(
+        kPdbgRegex, res
+    ), f"kPdbgRegex expected to match actual %dbg usage: {res}"
+    return res
+
+
 class ShellEnvironment(object):
 
     """Mutable shell environment containing things like CWD and env vars.
@@ -74,7 +82,7 @@ class ShellEnvironment(object):
         if os.path.isabs(newdir):
             self.cwd = newdir
         else:
-            self.cwd = os.path.realpath(os.path.join(self.cwd, newdir))
+            self.cwd = lit.util.abs_path_preserve_drive(os.path.join(self.cwd, newdir))
 
 
 class TimeoutHelper(object):
@@ -202,7 +210,7 @@ def expand_glob_expressions(args, cwd):
 
 
 def quote_windows_command(seq):
-    """
+    r"""
     Reimplement Python's private subprocess.list2cmdline for MSys compatibility
 
     Based on CPython implementation here:
@@ -427,7 +435,7 @@ def executeBuiltinMkdir(cmd, cmd_shenv):
         dir = to_unicode(dir) if kIsWindows else to_bytes(dir)
         cwd = to_unicode(cwd) if kIsWindows else to_bytes(cwd)
         if not os.path.isabs(dir):
-            dir = os.path.realpath(os.path.join(cwd, dir))
+            dir = lit.util.abs_path_preserve_drive(os.path.join(cwd, dir))
         if parent:
             lit.util.mkdir_p(dir)
         else:
@@ -473,7 +481,7 @@ def executeBuiltinRm(cmd, cmd_shenv):
         path = to_unicode(path) if kIsWindows else to_bytes(path)
         cwd = to_unicode(cwd) if kIsWindows else to_bytes(cwd)
         if not os.path.isabs(path):
-            path = os.path.realpath(os.path.join(cwd, path))
+            path = lit.util.abs_path_preserve_drive(os.path.join(cwd, path))
         if force and not os.path.exists(path):
             continue
         try:
@@ -985,7 +993,7 @@ def _executeShCmd(cmd, shenv, results, timeoutHelper):
 def executeScriptInternal(test, litConfig, tmpBase, commands, cwd):
     cmds = []
     for i, ln in enumerate(commands):
-        match = re.match(kPdbgRegex, ln)
+        match = re.fullmatch(kPdbgRegex, ln)
         if match:
             command = match.group(2)
             ln = commands[i] = match.expand(": '\\1'; \\2" if command else ": '\\1'")
@@ -1081,7 +1089,7 @@ def executeScript(test, litConfig, tmpBase, commands, cwd):
     f = open(script, mode, **open_kwargs)
     if isWin32CMDEXE:
         for i, ln in enumerate(commands):
-            match = re.match(kPdbgRegex, ln)
+            match = re.fullmatch(kPdbgRegex, ln)
             if match:
                 command = match.group(2)
                 commands[i] = match.expand(
@@ -1094,7 +1102,7 @@ def executeScript(test, litConfig, tmpBase, commands, cwd):
         f.write("\n@if %ERRORLEVEL% NEQ 0 EXIT\n".join(commands))
     else:
         for i, ln in enumerate(commands):
-            match = re.match(kPdbgRegex, ln)
+            match = re.fullmatch(kPdbgRegex, ln)
             if match:
                 command = match.group(2)
                 commands[i] = match.expand(": '\\1'; \\2" if command else ": '\\1'")
@@ -1228,18 +1236,10 @@ def getDefaultSubstitutions(test, tmpDir, tmpBase, normalize_slashes=False):
     substitutions.extend(test.config.substitutions)
     tmpName = tmpBase + ".tmp"
     baseName = os.path.basename(tmpBase)
-    substitutions.extend(
-        [
-            ("%s", sourcepath),
-            ("%S", sourcedir),
-            ("%p", sourcedir),
-            ("%{pathsep}", os.pathsep),
-            ("%t", tmpName),
-            ("%basename_t", baseName),
-            ("%T", tmpDir),
-        ]
-    )
 
+    substitutions.append(("%{pathsep}", os.pathsep))
+    substitutions.append(("%basename_t", baseName))
+    
     substitutions.extend(
         [
             ("%{fs-src-root}", pathlib.Path(sourcedir).anchor),
@@ -1248,49 +1248,47 @@ def getDefaultSubstitutions(test, tmpDir, tmpBase, normalize_slashes=False):
         ]
     )
 
-    # "%/[STpst]" should be normalized.
-    substitutions.extend(
-        [
-            ("%/s", sourcepath.replace("\\", "/")),
-            ("%/S", sourcedir.replace("\\", "/")),
-            ("%/p", sourcedir.replace("\\", "/")),
-            ("%/t", tmpBase.replace("\\", "/") + ".tmp"),
-            ("%/T", tmpDir.replace("\\", "/")),
-            ("%/et", tmpName.replace("\\", "\\\\\\\\\\\\\\\\")),
-        ]
-    )
+    substitutions.append(("%/et", tmpName.replace("\\", "\\\\\\\\\\\\\\\\")))
 
-    # "%{/[STpst]:regex_replacement}" should be normalized like "%/[STpst]" but we're
-    # also in a regex replacement context of a s@@@ regex.
     def regex_escape(s):
         s = s.replace("@", r"\@")
         s = s.replace("&", r"\&")
         return s
 
-    substitutions.extend(
-        [
-            ("%{/s:regex_replacement}", regex_escape(sourcepath.replace("\\", "/"))),
-            ("%{/S:regex_replacement}", regex_escape(sourcedir.replace("\\", "/"))),
-            ("%{/p:regex_replacement}", regex_escape(sourcedir.replace("\\", "/"))),
-            (
-                "%{/t:regex_replacement}",
-                regex_escape(tmpBase.replace("\\", "/")) + ".tmp",
-            ),
-            ("%{/T:regex_replacement}", regex_escape(tmpDir.replace("\\", "/"))),
-        ]
-    )
+    path_substitutions = [
+        ("s", sourcepath), ("S", sourcedir), ("p", sourcedir),
+        ("t", tmpName), ("T", tmpDir)
+    ]
+    for path_substitution in path_substitutions:
+        letter = path_substitution[0]
+        path = path_substitution[1]
 
-    # "%:[STpst]" are normalized paths without colons and without a leading
-    # slash.
-    substitutions.extend(
-        [
-            ("%:s", colonNormalizePath(sourcepath)),
-            ("%:S", colonNormalizePath(sourcedir)),
-            ("%:p", colonNormalizePath(sourcedir)),
-            ("%:t", colonNormalizePath(tmpBase + ".tmp")),
-            ("%:T", colonNormalizePath(tmpDir)),
-        ]
-    )
+        # Original path variant
+        substitutions.append(("%" + letter, path))
+
+        # Normalized path separator variant
+        substitutions.append(("%/" + letter, path.replace("\\", "/")))
+
+        # realpath variants
+        # Windows paths with substitute drives are not expanded by default
+        # as they are used to avoid MAX_PATH issues, but sometimes we do
+        # need the fully expanded path.
+        real_path = os.path.realpath(path)
+        substitutions.append(("%{" + letter + ":real}", real_path))
+        substitutions.append(("%{/" + letter + ":real}",
+            real_path.replace("\\", "/")))
+
+        # "%{/[STpst]:regex_replacement}" should be normalized like
+        # "%/[STpst]" but we're also in a regex replacement context
+        # of a s@@@ regex.
+        substitutions.append(
+            ("%{/" + letter + ":regex_replacement}",
+            regex_escape(path.replace("\\", "/"))))
+
+        # "%:[STpst]" are normalized paths without colons and without
+        # a leading slash.
+        substitutions.append(("%:" + letter, colonNormalizePath(path)))
+
     return substitutions
 
 
@@ -1558,7 +1556,7 @@ def applySubstitutions(script, substitutions, conditions={}, recursion_limit=Non
             return cond, ln
 
         def tryParseElse(ln):
-            match = _caching_re_compile("^\s*%else\s*(%{)?").search(ln)
+            match = _caching_re_compile(r"^\s*%else\s*(%{)?").search(ln)
             if not match:
                 return False, ln
             if not match.group(1):
@@ -1832,13 +1830,7 @@ class IntegratedTestKeywordParser(object):
         if not output or not output[-1].add_continuation(line_number, keyword, line):
             if output is None:
                 output = []
-            pdbg = "%dbg({keyword} at line {line_number})".format(
-                keyword=keyword, line_number=line_number
-            )
-            assert re.match(
-                kPdbgRegex + "$", pdbg
-            ), "kPdbgRegex expected to match actual %dbg usage"
-            line = "{pdbg} {real_command}".format(pdbg=pdbg, real_command=line)
+            line = buildPdbgCommand(f"{keyword} at line {line_number}", line)
             output.append(CommandDirective(line_number, line_number, keyword, line))
         return output
 
@@ -2043,6 +2035,27 @@ def parseIntegratedTestScript(test, additional_parsers=[], require_script=True):
 
 def _runShTest(test, litConfig, useExternalSh, script, tmpBase):
     def runOnce(execdir):
+        # Set unique LLVM_PROFILE_FILE for each run command
+        if litConfig.per_test_coverage:
+            # Extract the test case name from the test object, and remove the
+            # file extension.
+            test_case_name = test.path_in_suite[-1]
+            test_case_name = test_case_name.rsplit(".", 1)[0]
+            coverage_index = 0  # Counter for coverage file index
+            for i, ln in enumerate(script):
+                match = re.fullmatch(kPdbgRegex, ln)
+                if match:
+                    dbg = match.group(1)
+                    command = match.group(2)
+                else:
+                    command = ln
+                profile = f"{test_case_name}{coverage_index}.profraw"
+                coverage_index += 1
+                command = f"export LLVM_PROFILE_FILE={profile}; {command}"
+                if match:
+                    command = buildPdbgCommand(dbg, command)
+                script[i] = command
+
         if useExternalSh:
             res = executeScript(test, litConfig, tmpBase, script, execdir)
         else:
@@ -2066,7 +2079,14 @@ def _runShTest(test, litConfig, useExternalSh, script, tmpBase):
     # Re-run failed tests up to test.allowed_retries times.
     execdir = os.path.dirname(test.getExecPath())
     attempts = test.allowed_retries + 1
+    scriptInit = script
     for i in range(attempts):
+        # runOnce modifies script, but applying the modifications again to the
+        # result can corrupt script, so we restore the original upon a retry.
+        # A cleaner solution would be for runOnce to encapsulate operating on a
+        # copy of script, but we actually want it to modify the original script
+        # so we can print the modified version under "Script:" below.
+        script = scriptInit[:]
         res = runOnce(execdir)
         if isinstance(res, lit.Test.Result):
             return res

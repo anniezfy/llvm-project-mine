@@ -559,7 +559,7 @@ SampleProfileReaderBinary::readContextFromTable(size_t *RetIdx) {
   return CSNameTable[*ContextIdx];
 }
 
-ErrorOr<std::pair<SampleContext, hash_code>>
+ErrorOr<std::pair<SampleContext, uint64_t>>
 SampleProfileReaderBinary::readSampleContextFromTable() {
   SampleContext Context;
   size_t Idx;
@@ -574,14 +574,16 @@ SampleProfileReaderBinary::readSampleContextFromTable() {
       return EC;
     Context = SampleContext(*FName);
   }
-  hash_code Hash = MD5SampleContextStart[Idx];
+  // Since MD5SampleContextStart may point to the profile's file data, need to
+  // make sure it is reading the same value on big endian CPU.
+  uint64_t Hash = support::endian::read64le(MD5SampleContextStart + Idx);
   // Lazy computing of hash value, write back to the table to cache it. Only
   // compute the context's hash value if it is being referenced for the first
   // time.
-  if (Hash == hash_code(0)) {
+  if (Hash == 0) {
     assert(MD5SampleContextStart == MD5SampleContextTable.data());
     Hash = Context.getHashCode();
-    MD5SampleContextTable[Idx] = Hash;
+    support::endian::write64le(&MD5SampleContextTable[Idx], Hash);
   }
   return std::make_pair(Context, Hash);
 }
@@ -1087,7 +1089,7 @@ std::error_code SampleProfileReaderBinary::readNameTable() {
     if (std::error_code EC = Name.getError())
       return EC;
     if (UseMD5) {
-      uint64_t FID = MD5Hash(*Name);
+      uint64_t FID = hashFuncName(*Name);
       if (!ProfileIsCS)
         MD5SampleContextTable.emplace_back(FID);
       NameTable.emplace_back(MD5StringBuf.emplace_back(std::to_string(FID)));
@@ -1124,7 +1126,7 @@ SampleProfileReaderExtBinaryBase::readNameTableSec(bool IsMD5,
     NameTable.resize(*Size);
     MD5NameMemStart = Data;
     if (!ProfileIsCS)
-      MD5SampleContextStart = reinterpret_cast<const hash_code *>(Data);
+      MD5SampleContextStart = reinterpret_cast<const uint64_t *>(Data);
     Data = Data + (*Size) * sizeof(uint64_t);
     return sampleprof_error::success;
   }
@@ -1138,16 +1140,14 @@ SampleProfileReaderExtBinaryBase::readNameTableSec(bool IsMD5,
     MD5StringBuf.reserve(MD5StringBuf.size() + *Size);
     NameTable.clear();
     NameTable.reserve(*Size);
-    if (!ProfileIsCS) {
-      MD5SampleContextTable.clear();
-      MD5SampleContextTable.reserve(*Size);
-    }
+    if (!ProfileIsCS)
+      MD5SampleContextTable.resize(*Size);
     for (size_t I = 0; I < *Size; ++I) {
       auto FID = readNumber<uint64_t>();
       if (std::error_code EC = FID.getError())
         return EC;
       if (!ProfileIsCS)
-        MD5SampleContextTable.emplace_back(*FID);
+        support::endian::write64le(&MD5SampleContextTable[I], *FID);
       NameTable.emplace_back(MD5StringBuf.emplace_back(std::to_string(*FID)));
     }
     if (!ProfileIsCS)

@@ -85,9 +85,11 @@ Matcher<MCInst> IsMovImmediate(unsigned Opcode, int64_t Reg, int64_t Value) {
   return AllOf(OpcodeIs(Opcode), ElementsAre(IsReg(Reg), IsImm(Value)));
 }
 
+#ifdef __linux__
 Matcher<MCInst> IsMovRegToReg(unsigned Opcode, int64_t Reg1, int64_t Reg2) {
   return AllOf(OpcodeIs(Opcode), ElementsAre(IsReg(Reg1), IsReg(Reg2)));
 }
+#endif
 
 Matcher<MCInst> IsMovValueToStack(unsigned Opcode, int64_t Value,
                                   size_t Offset) {
@@ -633,11 +635,11 @@ TEST_F(X86Core2TargetTest, GenerateExitSyscallTest) {
 #define MAP_FIXED_NOREPLACE MAP_FIXED
 #endif
 
-// 32 bit ARM doesn't have mmap and uses mmap2 instead. The only difference
-// between the two syscalls is that mmap2's offset parameter is in terms 4096
-// byte offsets rather than individual bytes, so for our purposes they are
-// effectively the same as all ofsets here are set to 0.
-#ifdef __arm__
+// Some 32-bit architectures don't have mmap and define mmap2 instead. The only
+// difference between the two syscalls is that mmap2's offset parameter is in
+// terms 4096 byte offsets rather than individual bytes, so for our purposes
+// they are effectively the same as all ofsets here are set to 0.
+#if defined(SYS_mmap2) && !defined(SYS_mmap)
 #define SYS_mmap SYS_mmap2
 #endif
 

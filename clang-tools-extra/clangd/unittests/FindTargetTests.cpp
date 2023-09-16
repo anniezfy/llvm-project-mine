@@ -537,7 +537,7 @@ TEST_F(TargetDeclTest, Concept) {
     }
   )cpp";
   EXPECT_DECLS(
-      "ConceptSpecializationExpr",
+      "ConceptReference",
       {"template <typename T> concept Fooable = requires (T t) { t.foo(); }"});
 
   // trailing requires clause
@@ -548,7 +548,7 @@ TEST_F(TargetDeclTest, Concept) {
       template <typename T>
       void foo() requires [[Fooable]]<T>;
   )cpp";
-  EXPECT_DECLS("ConceptSpecializationExpr",
+  EXPECT_DECLS("ConceptReference",
                {"template <typename T> concept Fooable = true"});
 
   // constrained-parameter
@@ -559,7 +559,7 @@ TEST_F(TargetDeclTest, Concept) {
     template <[[Fooable]] T>
     void bar(T t);
   )cpp";
-  EXPECT_DECLS("ConceptSpecializationExpr",
+  EXPECT_DECLS("ConceptReference",
                {"template <typename T> concept Fooable = true"});
 
   // partial-concept-id
@@ -570,7 +570,7 @@ TEST_F(TargetDeclTest, Concept) {
     template <[[Fooable]]<int> T>
     void bar(T t);
   )cpp";
-  EXPECT_DECLS("ConceptSpecializationExpr",
+  EXPECT_DECLS("ConceptReference",
                {"template <typename T, typename U> concept Fooable = true"});
 }
 
@@ -1241,7 +1241,7 @@ protected:
   AllRefs annotatedReferences(llvm::StringRef Code, ParsedAST &AST,
                               std::vector<ReferenceLoc> Refs) {
     auto &SM = AST.getSourceManager();
-    llvm::sort(Refs, [&](const ReferenceLoc &L, const ReferenceLoc &R) {
+    llvm::stable_sort(Refs, [&](const ReferenceLoc &L, const ReferenceLoc &R) {
       return SM.isBeforeInTranslationUnit(L.NameLoc, R.NameLoc);
     });
 

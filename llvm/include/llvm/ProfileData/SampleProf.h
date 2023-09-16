@@ -318,7 +318,7 @@ struct LineLocationHash {
 
 raw_ostream &operator<<(raw_ostream &OS, const LineLocation &Loc);
 
-static inline hash_code hashFuncName(StringRef F) {
+static inline uint64_t hashFuncName(StringRef F) {
   // If function name is already MD5 string, do not hash again.
   uint64_t Hash;
   if (F.getAsInteger(10, Hash))
@@ -638,7 +638,7 @@ public:
     return getContextString(FullContext, false);
   }
 
-  hash_code getHashCode() const {
+  uint64_t getHashCode() const {
     if (hasContext())
       return hash_value(getContextFrames());
 
@@ -815,6 +815,12 @@ public:
     return Count;
   }
 
+  // Remove all call site samples for inlinees. This is needed when flattening
+  // a nested profile.
+  void removeAllCallsiteSamples() {
+    CallsiteSamples.clear();
+  }
+
   // Accumulate all call target samples to update the body samples.
   void updateCallsiteSamples() {
     for (auto &I : BodySamples) {
@@ -971,8 +977,6 @@ public:
   const CallsiteSampleMap &getCallsiteSamples() const {
     return CallsiteSamples;
   }
-
-  CallsiteSampleMap &getCallsiteSamples() { return CallsiteSamples; }
 
   /// Return the maximum of sample counts in a function body. When SkipCallSite
   /// is false, which is the default, the return count includes samples in the
@@ -1295,19 +1299,16 @@ raw_ostream &operator<<(raw_ostream &OS, const FunctionSamples &FS);
 /// performance of insert and query operations especially when hash values of
 /// keys are available a priori, and reduces memory usage if KeyT has a large
 /// size.
-/// When performing any action, if an existing entry with a given key is found,
-/// and the interface "KeyT ValueT::getKey<KeyT>() const" to retrieve a value's
-/// original key exists, this class checks if the given key actually matches
-/// the existing entry's original key. If they do not match, this class behaves
-/// as if the entry did not exist (for insertion, this means the new value will
-/// replace the existing entry's value, as if it is newly inserted). If
-/// ValueT::getKey<KeyT>() is not available, all keys with the same hash value
-/// are considered equivalent (i.e. hash collision is silently ignored). Given
-/// such feature this class should only be used where it does not affect
-/// compilation correctness, for example, when loading a sample profile.
-/// Assuming the hashing algorithm is uniform, the probability of hash collision
-/// with 1,000,000 entries is
-/// (2^64)!/((2^64-1000000)!*(2^64)^1000000) ~= 3*10^-8.
+/// All keys with the same hash value are considered equivalent (i.e. hash
+/// collision is silently ignored). Given such feature this class should only be
+/// used where it does not affect compilation correctness, for example, when
+/// loading a sample profile.
+/// Assuming the hashing algorithm is uniform, we use the formula
+/// 1 - Permute(n, k) / n ^ k where n is the universe size and k is number of
+/// elements chosen at random to calculate the probability of collision. With
+/// 1,000,000 entries the probability is negligible:
+/// 1 - (2^64)!/((2^64-1000000)!*(2^64)^1000000) ~= 3*10^-8.
+/// Source: https://en.wikipedia.org/wiki/Birthday_problem
 template <template <typename, typename, typename...> typename MapT,
           typename KeyT, typename ValueT, typename... MapTArgs>
 class HashKeyMap : public MapT<hash_code, ValueT, MapTArgs...> {
@@ -1321,42 +1322,12 @@ public:
   using iterator = typename base_type::iterator;
   using const_iterator = typename base_type::const_iterator;
 
-private:
-  // If the value type has getKey(), retrieve its original key for comparison.
-  template <typename U = mapped_type,
-            typename = decltype(U().template getKey<original_key_type>())>
-  static bool
-  CheckKeyMatch(const original_key_type &Key, const mapped_type &ExistingValue,
-                original_key_type *ExistingKeyIfDifferent = nullptr) {
-    const original_key_type &ExistingKey =
-        ExistingValue.template getKey<original_key_type>();
-    bool Result = (Key == ExistingKey);
-    if (!Result && ExistingKeyIfDifferent)
-      *ExistingKeyIfDifferent = ExistingKey;
-    return Result;
-  }
-
-  // If getKey() does not exist, this overload is selected, which assumes all
-  // keys with the same hash are equivalent.
-  static bool CheckKeyMatch(...) { return true; }
-
-public:
   template <typename... Ts>
   std::pair<iterator, bool> try_emplace(const key_type &Hash,
                                         const original_key_type &Key,
                                         Ts &&...Args) {
     assert(Hash == hash_value(Key));
-    auto Ret = base_type::try_emplace(Hash, std::forward<Ts>(Args)...);
-    if (!Ret.second) {
-      original_key_type ExistingKey;
-      if (LLVM_UNLIKELY(!CheckKeyMatch(Key, Ret.first->second, &ExistingKey))) {
-        dbgs() << "MD5 collision detected: " << Key << " and " << ExistingKey
-               << " has same hash value " << Hash << "\n";
-        Ret.second = true;
-        Ret.first->second = mapped_type(std::forward<Ts>(Args)...);
-      }
-    }
-    return Ret;
+    return base_type::try_emplace(Hash, std::forward<Ts>(Args)...);
   }
 
   template <typename... Ts>
@@ -1378,8 +1349,7 @@ public:
     key_type Hash = hash_value(Key);
     auto It = base_type::find(Hash);
     if (It != base_type::end())
-      if (LLVM_LIKELY(CheckKeyMatch(Key, It->second)))
-        return It;
+      return It;
     return base_type::end();
   }
 
@@ -1387,8 +1357,7 @@ public:
     key_type Hash = hash_value(Key);
     auto It = base_type::find(Hash);
     if (It != base_type::end())
-      if (LLVM_LIKELY(CheckKeyMatch(Key, It->second)))
-        return It;
+      return It;
     return base_type::end();
   }
 
@@ -1408,7 +1377,7 @@ public:
 /// Note: when populating container, make sure to assign the SampleContext to
 /// the mapped value immediately because the key no longer holds it.
 class SampleProfileMap
-    : public HashKeyMap<DenseMap, SampleContext, FunctionSamples> {
+    : public HashKeyMap<std::unordered_map, SampleContext, FunctionSamples> {
 public:
   // Convenience method because this is being used in many places. Set the
   // FunctionSamples' context if its newly inserted.
@@ -1420,33 +1389,23 @@ public:
   }
 
   iterator find(const SampleContext &Ctx) {
-    return HashKeyMap<llvm::DenseMap, SampleContext, FunctionSamples>::find(
+    return HashKeyMap<std::unordered_map, SampleContext, FunctionSamples>::find(
         Ctx);
   }
 
   const_iterator find(const SampleContext &Ctx) const {
-    return HashKeyMap<llvm::DenseMap, SampleContext, FunctionSamples>::find(
+    return HashKeyMap<std::unordered_map, SampleContext, FunctionSamples>::find(
         Ctx);
   }
 
-  // Overloaded find() to lookup a function by name. This is called by IPO
-  // passes with an actual function name, and it is possible that the profile
-  // reader converted function names in the profile to MD5 strings, so we need
-  // to check if either representation matches.
+  // Overloaded find() to lookup a function by name.
   iterator find(StringRef Fname) {
-    hash_code Hash = hashFuncName(Fname);
-    auto It = base_type::find(Hash);
-    if (It != end()) {
-      StringRef CtxName = It->second.getContext().getName();
-      if (LLVM_LIKELY(CtxName == Fname || CtxName == std::to_string(Hash)))
-        return It;
-    }
-    return end();
+    return base_type::find(hashFuncName(Fname));
   }
 
   size_t erase(const SampleContext &Ctx) {
-    return HashKeyMap<llvm::DenseMap, SampleContext, FunctionSamples>::erase(
-        Ctx);
+    return HashKeyMap<std::unordered_map, SampleContext, FunctionSamples>::
+        erase(Ctx);
   }
 
   size_t erase(const key_type &Key) { return base_type::erase(Key); }
@@ -1564,9 +1523,9 @@ private:
     auto Ret = OutputProfiles.try_emplace(Context, FS);
     FunctionSamples &Profile = Ret.first->second;
     if (Ret.second) {
-      // When it's the copy of the old profile, just clear all the inlinees'
-      // samples.
-      Profile.getCallsiteSamples().clear();
+      // Clear nested inlinees' samples for the flattened copy. These inlinees
+      // will have their own top-level entries after flattening.
+      Profile.removeAllCallsiteSamples();
       // We recompute TotalSamples later, so here set to zero.
       Profile.setTotalSamples(0);
     } else {

@@ -357,7 +357,7 @@ std::error_code SampleProfileWriterExtBinaryBase::writeNameTable() {
   encodeULEB128(NameTable.size(), OS);
   support::endian::Writer Writer(OS, support::little);
   for (auto N : V)
-    Writer.write(MD5Hash(N));
+    Writer.write(hashFuncName(N));
   return sampleprof_error::success;
 }
 

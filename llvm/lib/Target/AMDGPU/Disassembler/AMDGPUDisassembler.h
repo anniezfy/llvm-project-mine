@@ -25,6 +25,7 @@
 
 namespace llvm {
 
+class MCAsmInfo;
 class MCInst;
 class MCOperand;
 class MCSubtargetInfo;
@@ -92,10 +93,12 @@ class AMDGPUDisassembler : public MCDisassembler {
 private:
   std::unique_ptr<MCInstrInfo const> const MCII;
   const MCRegisterInfo &MRI;
+  const MCAsmInfo &MAI;
   const unsigned TargetMaxInstBytes;
   mutable ArrayRef<uint8_t> Bytes;
   mutable uint32_t Literal;
   mutable bool HasLiteral;
+  mutable std::optional<bool> EnableWavefrontSize32;
 
 public:
   AMDGPUDisassembler(const MCSubtargetInfo &STI, MCContext &Ctx,
@@ -165,6 +168,13 @@ public:
   /// \param KdStream       - Stream to write the disassembled directives to.
   // NOLINTNEXTLINE(readability-identifier-naming)
   DecodeStatus decodeCOMPUTE_PGM_RSRC2(uint32_t FourByteBuffer,
+                                       raw_string_ostream &KdStream) const;
+
+  /// Decode as directives that handle COMPUTE_PGM_RSRC3.
+  /// \param FourByteBuffer - Bytes holding contents of COMPUTE_PGM_RSRC3.
+  /// \param KdStream       - Stream to write the disassembled directives to.
+  // NOLINTNEXTLINE(readability-identifier-naming)
+  DecodeStatus decodeCOMPUTE_PGM_RSRC3(uint32_t FourByteBuffer,
                                        raw_string_ostream &KdStream) const;
 
   DecodeStatus convertEXPInst(MCInst &MI) const;

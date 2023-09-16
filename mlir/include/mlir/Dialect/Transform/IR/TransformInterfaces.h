@@ -16,6 +16,7 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Support/LogicalResult.h"
+#include "mlir/Transforms/DialectConversion.h"
 
 namespace mlir {
 namespace transform {
@@ -169,6 +170,12 @@ private:
   /// should be emitted when the value is used.
   using InvalidatedHandleMap = DenseMap<Value, std::function<void(Location)>>;
 
+#ifndef LLVM_ENABLE_ABI_BREAKING_CHECKS
+  /// Debug only: A timestamp is associated with each transform IR value, so
+  /// that invalid iterator usage can be detected more reliably.
+  using TransformIRTimestampMapping = DenseMap<Value, int64_t>;
+#endif // LLVM_ENABLE_ABI_BREAKING_CHECKS
+
   /// The bidirectional mappings between transform IR values and payload IR
   /// operations, and the mapping between transform IR values and parameters.
   struct Mappings {
@@ -177,6 +184,11 @@ private:
     ParamMapping params;
     ValueMapping values;
     ValueMapping reverseValues;
+
+#ifndef LLVM_ENABLE_ABI_BREAKING_CHECKS
+    TransformIRTimestampMapping timestamps;
+    void incrementTimestamp(Value value) { ++timestamps[value]; }
+#endif // LLVM_ENABLE_ABI_BREAKING_CHECKS
   };
 
   friend LogicalResult applyTransforms(Operation *, TransformOpInterface,
@@ -206,10 +218,26 @@ public:
   /// not enumerated. This function is helpful for transformations that apply to
   /// a particular handle.
   auto getPayloadOps(Value value) const {
+    ArrayRef<Operation *> view = getPayloadOpsView(value);
+
+#ifndef LLVM_ENABLE_ABI_BREAKING_CHECKS
+    // Memorize the current timestamp and make sure that it has not changed
+    // when incrementing or dereferencing the iterator returned by this
+    // function. The timestamp is incremented when the "direct" mapping is
+    // resized; this would invalidate the iterator returned by this function.
+    int64_t currentTimestamp = getMapping(value).timestamps.lookup(value);
+#endif // LLVM_ENABLE_ABI_BREAKING_CHECKS
+
     // When ops are replaced/erased, they are replaced with nullptr (until
     // the data structure is compacted). Do not enumerate these ops.
-    return llvm::make_filter_range(getPayloadOpsView(value),
-                                   [](Operation *op) { return op != nullptr; });
+    return llvm::make_filter_range(view, [=](Operation *op) {
+#ifndef LLVM_ENABLE_ABI_BREAKING_CHECKS
+      bool sameTimestamp =
+          currentTimestamp == this->getMapping(value).timestamps.lookup(value);
+      assert(sameTimestamp && "iterator was invalidated during iteration");
+#endif // LLVM_ENABLE_ABI_BREAKING_CHECKS
+      return op != nullptr;
+    });
   }
 
   /// Returns the list of parameters that the given transform IR value
@@ -285,7 +313,8 @@ public:
     /// transform IR region and payload IR objects.
     RegionScope(TransformState &state, Region &region)
         : state(state), region(&region) {
-      auto res = state.mappings.insert(std::make_pair(&region, Mappings()));
+      auto res = state.mappings.insert(
+          std::make_pair(&region, std::make_unique<Mappings>()));
       assert(res.second && "the region scope is already present");
       (void)res;
 #if LLVM_ENABLE_ABI_BREAKING_CHECKS
@@ -437,7 +466,7 @@ private:
       }
     }
 #endif // NDEBUG
-    return it->second;
+    return *it->second;
   }
 
   /// Returns the mappings frame for the region in which the operation resides.
@@ -464,7 +493,7 @@ private:
       }
     }
 #endif // NDEBUG
-    return it->second;
+    return *it->second;
   }
 
   /// Updates the state to include the associations between op results and the
@@ -683,7 +712,10 @@ private:
 
   /// A stack of mappings between transform IR values and payload IR ops,
   /// aggregated by the region in which the transform IR values are defined.
-  llvm::MapVector<Region *, Mappings> mappings;
+  /// We use a pointer to the Mappings struct so that reallocations inside
+  /// MapVector don't invalidate iterators when we apply nested transform ops
+  /// while also iterating over the mappings.
+  llvm::MapVector<Region *, std::unique_ptr<Mappings>> mappings;
 
   /// Op handles may be temporarily mapped to nullptr to avoid invalidating
   /// payload op iterators. This set contains all op handles with nullptrs.
@@ -1150,6 +1182,11 @@ bool isHandleConsumed(Value handle, transform::TransformOpInterface transform);
 /// IR resource.
 void modifiesPayload(SmallVectorImpl<MemoryEffects::EffectInstance> &effects);
 void onlyReadsPayload(SmallVectorImpl<MemoryEffects::EffectInstance> &effects);
+
+/// Checks whether the transform op modifies the payload.
+bool doesModifyPayload(transform::TransformOpInterface transform);
+/// Checks whether the transform op reads the payload.
+bool doesReadPayload(transform::TransformOpInterface transform);
 
 /// Populates `consumedArguments` with positions of `block` arguments that are
 /// consumed by the operations in the `block`.

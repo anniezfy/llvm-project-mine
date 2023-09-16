@@ -1,5 +1,3 @@
-; UNSUPPORTED: expensive_checks
-
 ; RUN: llc -mtriple=thumbv8m.base-eabi -mattr=+execute-only %s -o - | FileCheck --check-prefix=CHECK --check-prefix=CHECK-T2BASE %s
 ; RUN: llc -mtriple=thumbv8m.base-eabi -mcpu=cortex-m23 -mattr=+execute-only %s -o - | FileCheck --check-prefix=CHECK --check-prefix=CHECK-T2BASE %s
 ; RUN: llc -mtriple=thumbv7m-eabi      -mattr=+execute-only %s -o - | FileCheck --check-prefix=CHECK --check-prefix=CHECK-T2 %s
@@ -46,6 +44,27 @@ define i32 @jump_table(i32 %c, i32 %a, i32 %b) #0 {
 ; CHECK-NEXT: b.w
 ; CHECK-NEXT: b.w
 ; CHECK-NEXT: b.w
+
+; CHECK-T1-LABEL: jump_table:
+; CHECK-T1:      lsls [[REG_OFFSET:r[0-9]+]], {{r[0-9]+}}, #2
+; CHECK-T1-NEXT: movs [[REG_JT:r[0-9]+]], :upper8_15:.LJTI1_0
+; CHECK-T1-NEXT: lsls [[REG_JT]], [[REG_JT]], #8
+; CHECK-T1-NEXT: adds [[REG_JT]], :upper0_7:.LJTI1_0
+; CHECK-T1-NEXT: lsls [[REG_JT]], [[REG_JT]], #8
+; CHECK-T1-NEXT: adds [[REG_JT]], :lower8_15:.LJTI1_0
+; CHECK-T1-NEXT: lsls [[REG_JT]], [[REG_JT]], #8
+; CHECK-T1-NEXT: adds [[REG_JT]], :lower0_7:.LJTI1_0
+; CHECK-T1-NEXT: ldr  [[REG_ENTRY:r[0-9]+]], [[[REG_JT]], [[REG_OFFSET]]]
+; CHECK-T1-NEXT: mov  pc, [[REG_ENTRY]]
+; CHECK-T1:      .section .rodata,"a",%progbits
+; CHECK-T1-NEXT: .p2align 2, 0x0
+; CHECK-T1-NEXT: .LJTI1_0:
+; CHECK-T1-NEXT: .long
+; CHECK-T1-NEXT: .long
+; CHECK-T1-NEXT: .long
+; CHECK-T1-NEXT: .long
+; CHECK-T1-NEXT: .long
+; CHECK-T1-NEXT: .long
 
 entry:
   switch i32 %c, label %return [
@@ -122,4 +141,90 @@ entry:
 
   %v = load i32, ptr @external_global
   ret i32 %v
+}
+
+define i32 @test_imm() {
+entry:
+; CHECK-LABEL: test_imm:
+; CHECK: movw [[IMMDEST:r[0-9]+]], #13124
+; CHECK-NEXT: movt [[IMMDEST]], #4386
+; CHECK-NEXT: bx lr
+; CHECK-T1-LABEL: test_imm:
+; CHECK-T1: movs [[IMMDEST:r[0-9]+]], #17
+; CHECK-T1-NEXT: lsls [[IMMDEST]], [[IMMDEST]], #8
+; CHECK-T1-NEXT: adds [[IMMDEST]], #34
+; CHECK-T1-NEXT: lsls [[IMMDEST]], [[IMMDEST]], #8
+; CHECK-T1-NEXT: adds [[IMMDEST]], #51
+; CHECK-T1-NEXT: lsls [[IMMDEST]], [[IMMDEST]], #8
+; CHECK-T1-NEXT: adds [[IMMDEST]], #68
+; CHECK-T1-NEXT: bx lr
+
+  ret i32 u0x11223344
+}
+
+define i32 @test_imm_high_half() {
+entry:
+; CHECK-LABEL: test_imm_high_half:
+; CHECK-T2BASE: movw [[IMMDEST:r[0-9]+]], #0
+; CHECK-T2: movs [[IMMDEST:r[0-9]+]], #0
+; CHECK-NEXT: movt [[IMMDEST]], #4386
+; CHECK-NEXT: bx lr
+; CHECK-T1-LABEL: test_imm_high_half:
+; CHECK-T1: movs [[IMMDEST:r[0-9]+]], #17
+; CHECK-T1-NEXT: lsls [[IMMDEST]], [[IMMDEST]], #8
+; CHECK-T1-NEXT: adds [[IMMDEST]], #34
+; CHECK-T1-NEXT: lsls [[IMMDEST]], [[IMMDEST]], #16
+; CHECK-T1-NEXT: bx lr
+
+  ret i32 u0x11220000
+}
+
+define i32 @test_imm_low_half() {
+; CHECK-LABEL: test_imm_low_half:
+; CHECK: movw [[IMMDEST:r[0-9]+]], #13124
+; CHECK-NEXT: bx lr
+; CHECK-T1-LABEL: test_imm_low_half:
+; CHECK-T1: movs [[IMMDEST]], #51
+; CHECK-T1-NEXT: lsls [[IMMDEST]], [[IMMDEST]], #8
+; CHECK-T1-NEXT: adds [[IMMDEST]], #68
+; CHECK-T1-NEXT: bx lr
+
+entry:
+  ret i32 u0x3344
+}
+
+define i32 @test_imm_middle_bytes() {
+; CHECK-LABEL: test_imm_middle_bytes:
+; CHECK: movw [[IMMDEST:r[0-9]+]], #13056
+; CHECK-NEXT: movt [[IMMDEST]], #34
+; CHECK-NEXT: bx lr
+; CHECK-T1-LABEL: test_imm_middle_bytes:
+; CHECK-T1: movs [[IMMDEST]], #34
+; CHECK-T1-NEXT: lsls [[IMMDEST]], [[IMMDEST]], #8
+; CHECK-T1-NEXT: adds [[IMMDEST]], #51
+; CHECK-T1-NEXT: lsls [[IMMDEST]], [[IMMDEST]], #8
+; CHECK-T1-NEXT: bx lr
+
+  ret i32 u0x223300
+}
+
+; This struct is sized so that the byval call does an inline memcpy of
+; 0x10001 bytes.
+%struct.struct_t = type { [65553 x i8] }
+@byval_arg = global %struct.struct_t zeroinitializer
+declare void @byval_fn(ptr byval(%struct.struct_t))
+
+define void @test_byval_call() {
+entry:
+; CHECK-LABEL: test_byval_call:
+; CHECK-T2BASE: movw [[BYVAL_CPYSIZE:r[0-9]+]], #1
+; CHECK-T2: movs [[BYVAL_CPYSIZE:r[0-9]+]], #1
+; CHECK: movt [[BYVAL_CPYSIZE]], #1
+; CHECK-T1-LABEL: test_byval_call:
+; CHECK-T1: movs [[BYVAL_CPYSIZE:r[0-9]+]], #1
+; CHECK-T1: lsls [[BYVAL_CPYSIZE]], [[BYVAL_CPYSIZE]], #16
+; CHECK-T1: adds [[BYVAL_CPYSIZE]], #1
+
+  call void @byval_fn(ptr byval(%struct.struct_t) @byval_arg)
+  ret void
 }

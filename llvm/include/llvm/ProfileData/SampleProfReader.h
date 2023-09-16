@@ -407,16 +407,6 @@ public:
     return getSamplesFor(CanonName);
   }
 
-  /// Return the samples collected for function \p F, create empty
-  /// FunctionSamples if it doesn't exist.
-  FunctionSamples *getOrCreateSamplesFor(const Function &F) {
-    StringRef CanonName = FunctionSamples::getCanonicalFnName(F);
-    auto it = Profiles.find(CanonName);
-    if (it != Profiles.end())
-      return &it->second;
-    return &Profiles[CanonName];
-  }
-
   /// Return the samples collected for function \p F.
   FunctionSamples *getSamplesFor(StringRef Fname) {
     auto It = Profiles.find(Fname);
@@ -655,7 +645,7 @@ protected:
 
   /// Read a context indirectly via the CSNameTable if the profile has context,
   /// otherwise same as readStringFromTable, also return its hash value.
-  ErrorOr<std::pair<SampleContext, hash_code>> readSampleContextFromTable();
+  ErrorOr<std::pair<SampleContext, uint64_t>> readSampleContextFromTable();
 
   /// Points to the current location in the buffer.
   const uint8_t *Data = nullptr;
@@ -685,13 +675,13 @@ protected:
   /// Table to cache MD5 values of sample contexts corresponding to
   /// readSampleContextFromTable(), used to index into Profiles or
   /// FuncOffsetTable.
-  std::vector<hash_code> MD5SampleContextTable;
+  std::vector<uint64_t> MD5SampleContextTable;
 
   /// The starting address of the table of MD5 values of sample contexts. For
   /// fixed length MD5 non-CS profile it is same as MD5NameMemStart because
   /// hashes of non-CS contexts are already in the profile. Otherwise it points
   /// to the start of MD5SampleContextTable.
-  const hash_code *MD5SampleContextStart = nullptr;
+  const uint64_t *MD5SampleContextStart = nullptr;
 
 private:
   std::error_code readSummaryEntry(std::vector<ProfileSummaryEntry> &Entries);
