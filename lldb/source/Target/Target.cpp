@@ -860,7 +860,8 @@ WatchpointSP Target::CreateWatchpoint(lldb::addr_t addr, size_t size,
     size_t old_size = matched_sp->GetByteSize();
     uint32_t old_type =
         (matched_sp->WatchpointRead() ? LLDB_WATCH_TYPE_READ : 0) |
-        (matched_sp->WatchpointWrite() ? LLDB_WATCH_TYPE_WRITE : 0);
+        (matched_sp->WatchpointWrite() ? LLDB_WATCH_TYPE_WRITE : 0) |
+        (matched_sp->WatchpointModify() ? LLDB_WATCH_TYPE_MODIFY : 0);
     // Return the existing watchpoint if both size and type match.
     if (size == old_size && kind == old_type) {
       wp_sp = matched_sp;
@@ -4236,8 +4237,8 @@ bool TargetProperties::SetPreferDynamicValue(lldb::DynamicValueType d) {
 }
 
 bool TargetProperties::GetPreloadSymbols() const {
-  if (INTERRUPT_REQUESTED(m_target->GetDebugger(), 
-      "Interrupted checking preload symbols")) {
+  if (INTERRUPT_REQUESTED(m_target->GetDebugger(),
+                          "Interrupted checking preload symbols")) {
     return false;
   }
   const uint32_t idx = ePropertyPreloadSymbols;
@@ -4535,6 +4536,12 @@ void TargetProperties::CheckJITObjectsDir() {
 
 bool TargetProperties::GetEnableSyntheticValue() const {
   const uint32_t idx = ePropertyEnableSynthetic;
+  return GetPropertyAtIndexAs<bool>(
+      idx, g_target_properties[idx].default_uint_value != 0);
+}
+
+bool TargetProperties::ShowHexVariableValuesWithLeadingZeroes() const {
+  const uint32_t idx = ePropertyShowHexVariableValuesWithLeadingZeroes;
   return GetPropertyAtIndexAs<bool>(
       idx, g_target_properties[idx].default_uint_value != 0);
 }

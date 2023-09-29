@@ -14,6 +14,7 @@
 //===----------------------------------------------------------------------===//
 
 include "RISCV.td"
+include "RISCVCombine.td"
 
 def simm12Plus1 : ImmLeaf<XLenVT, [{
     return (isInt<12>(Imm) && Imm != -2048) || Imm == 2048;}]>;
@@ -41,6 +42,8 @@ def : Pat<(i32 (sub GPR:$rs1, GPR:$rs2)), (SUBW GPR:$rs1, GPR:$rs2)>;
 def : Pat<(i32 (shl GPR:$rs1, (i32 GPR:$rs2))), (SLLW GPR:$rs1, GPR:$rs2)>;
 def : Pat<(i32 (sra GPR:$rs1, (i32 GPR:$rs2))), (SRAW GPR:$rs1, GPR:$rs2)>;
 def : Pat<(i32 (srl GPR:$rs1, (i32 GPR:$rs2))), (SRLW GPR:$rs1, GPR:$rs2)>;
+
+def: Pat<(i64 (sext i32:$rs)), (ADDIW GPR:$rs, 0)>;
 }
 
 let Predicates = [HasStdExtMOrZmmul, IsRV64] in {
@@ -53,3 +56,9 @@ def : Pat<(i32 (srem GPR:$rs1, GPR:$rs2)), (REMW GPR:$rs1, GPR:$rs2)>;
 def : Pat<(i32 (udiv GPR:$rs1, GPR:$rs2)), (DIVUW GPR:$rs1, GPR:$rs2)>;
 def : Pat<(i32 (urem GPR:$rs1, GPR:$rs2)), (REMUW GPR:$rs1, GPR:$rs2)>;
 }
+
+let Predicates = [HasStdExtZba, IsRV64] in
+def : Pat<(i64 (zext i32:$rs)), (ADD_UW GPR:$rs, (XLenVT X0))>;
+
+let Predicates = [IsRV64, NotHasStdExtZba] in
+def: Pat<(i64 (zext i32:$rs)), (SRLI (SLLI GPR:$rs, 32), 32)>;

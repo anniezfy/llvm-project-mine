@@ -149,9 +149,10 @@ static void RenderLocation(InternalScopedString *Buffer, Location Loc) {
     if (SLoc.isInvalid())
       Buffer->AppendF("<unknown>");
     else
-      RenderSourceLocation(Buffer, SLoc.getFilename(), SLoc.getLine(),
-                           SLoc.getColumn(), common_flags()->symbolize_vs_style,
-                           common_flags()->strip_path_prefix);
+      StackTracePrinter::GetOrInit()->RenderSourceLocation(
+          Buffer, SLoc.getFilename(), SLoc.getLine(), SLoc.getColumn(),
+          common_flags()->symbolize_vs_style,
+          common_flags()->strip_path_prefix);
     return;
   }
   case Location::LK_Memory:
@@ -160,12 +161,14 @@ static void RenderLocation(InternalScopedString *Buffer, Location Loc) {
   case Location::LK_Symbolized: {
     const AddressInfo &Info = Loc.getSymbolizedStack()->info;
     if (Info.file)
-      RenderSourceLocation(Buffer, Info.file, Info.line, Info.column,
-                           common_flags()->symbolize_vs_style,
-                           common_flags()->strip_path_prefix);
+      StackTracePrinter::GetOrInit()->RenderSourceLocation(
+          Buffer, Info.file, Info.line, Info.column,
+          common_flags()->symbolize_vs_style,
+          common_flags()->strip_path_prefix);
     else if (Info.module)
-      RenderModuleLocation(Buffer, Info.module, Info.module_offset,
-                           Info.module_arch, common_flags()->strip_path_prefix);
+      StackTracePrinter::GetOrInit()->RenderModuleLocation(
+          Buffer, Info.module, Info.module_offset, Info.module_arch,
+          common_flags()->strip_path_prefix);
     else
       Buffer->AppendF("%p", reinterpret_cast<void *>(Info.address));
     return;
@@ -223,7 +226,7 @@ static void RenderText(InternalScopedString *Buffer, const char *Message,
 #else
       snprintf(FloatBuffer, sizeof(FloatBuffer), "%Lg", (long double)A.Float);
 #endif
-      Buffer->AppendF("%s", FloatBuffer);
+      Buffer->Append(FloatBuffer);
       break;
     }
     case Diag::AK_Pointer:
@@ -289,7 +292,7 @@ static void PrintMemorySnippet(const Decorator &Decor, MemoryLocation Loc,
   Buffer.AppendF("\n");
 
   // Emit highlights.
-  Buffer.AppendF("%s", Decor.Highlight());
+  Buffer.Append(Decor.Highlight());
   Range *InRange = upperBound(Min, Ranges, NumRanges);
   for (uptr P = Min; P != Max; ++P) {
     char Pad = ' ', Byte = ' ';
@@ -358,7 +361,7 @@ Diag::~Diag() {
     Buffer.clear();
   }
 
-  Buffer.AppendF("%s", Decor.Bold());
+  Buffer.Append(Decor.Bold());
   RenderLocation(&Buffer, Loc);
   Buffer.AppendF(":");
 

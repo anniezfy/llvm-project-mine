@@ -253,6 +253,29 @@ bool ByteCodeExprGen<Emitter>::VisitBinaryOperator(const BinaryOperator *BO) {
     return this->delegate(RHS);
   }
 
+  // Special case for C++'s three-way/spaceship operator <=>, which
+  // returns a std::{strong,weak,partial}_ordering (which is a class, so doesn't
+  // have a PrimType).
+  if (!T) {
+    if (DiscardResult)
+      return true;
+    const ComparisonCategoryInfo *CmpInfo =
+        Ctx.getASTContext().CompCategories.lookupInfoForType(BO->getType());
+    assert(CmpInfo);
+
+    // We need a temporary variable holding our return value.
+    if (!Initializing) {
+      std::optional<unsigned> ResultIndex = this->allocateLocal(BO, false);
+      if (!this->emitGetPtrLocal(*ResultIndex, BO))
+        return false;
+    }
+
+    if (!visit(LHS) || !visit(RHS))
+      return false;
+
+    return this->emitCMP3(*LT, CmpInfo, BO);
+  }
+
   if (!LT || !RT || !T)
     return this->bail(BO);
 
@@ -571,8 +594,10 @@ bool ByteCodeExprGen<Emitter>::VisitInitListExpr(const InitListExpr *E) {
 
   // Primitive values.
   if (std::optional<PrimType> T = classify(E->getType())) {
-    assert(E->getNumInits() == 1);
     assert(!DiscardResult);
+    if (E->getNumInits() == 0)
+      return this->visitZeroInitializer(E->getType(), E);
+    assert(E->getNumInits() == 1);
     return this->delegate(E->inits()[0]);
   }
 
@@ -1932,15 +1957,13 @@ template <class Emitter>
 const RecordType *ByteCodeExprGen<Emitter>::getRecordTy(QualType Ty) {
   if (const PointerType *PT = dyn_cast<PointerType>(Ty))
     return PT->getPointeeType()->getAs<RecordType>();
-  else
-    return Ty->getAs<RecordType>();
+  return Ty->getAs<RecordType>();
 }
 
 template <class Emitter>
 Record *ByteCodeExprGen<Emitter>::getRecord(QualType Ty) {
-  if (auto *RecordTy = getRecordTy(Ty)) {
+  if (const auto *RecordTy = getRecordTy(Ty))
     return getRecord(RecordTy->getDecl());
-  }
   return nullptr;
 }
 
