@@ -3818,35 +3818,21 @@ void InnerLoopVectorizer::fixReduction(VPReductionPHIRecipe *PhiR,
   // instead of the former. For an inloop reduction the reduction will already
   // be predicated, and does not need to be handled here.
   if (Cost->foldTailByMasking() && !PhiR->isInLoop()) {
-    for (unsigned Part = 0; Part < UF; ++Part) {
-      Value *VecLoopExitInst = State.get(LoopExitInstDef, Part);
-      SelectInst *Sel = nullptr;
-      for (User *U : VecLoopExitInst->users()) {
-        if (isa<SelectInst>(U)) {
-          assert((!Sel || U == Sel) &&
-                 "Reduction exit feeding two different selects");
-          Sel = cast<SelectInst>(U);
-        } else
-          assert(isa<PHINode>(U) && "Reduction exit must feed Phi's or select");
-      }
-      assert(Sel && "Reduction exit feeds no select");
-      State.reset(LoopExitInstDef, Sel, Part);
-
-      // If the target can create a predicated operator for the reduction at no
-      // extra cost in the loop (for example a predicated vadd), it can be
-      // cheaper for the select to remain in the loop than be sunk out of it,
-      // and so use the select value for the phi instead of the old
-      // LoopExitValue.
-      if (PreferPredicatedReductionSelect ||
-          TTI->preferPredicatedReductionSelect(
-              RdxDesc.getOpcode(), PhiTy,
-              TargetTransformInfo::ReductionFlags())) {
-        auto *VecRdxPhi =
-            cast<PHINode>(State.get(PhiR, Part));
-        VecRdxPhi->setIncomingValueForBlock(VectorLoopLatch, Sel);
+    VPValue *Def = nullptr;
+    for (VPUser *U : LoopExitInstDef->users()) {
+      auto *S = dyn_cast<VPInstruction>(U);
+      if (S && S->getOpcode() == Instruction::Select) {
+        Def = S;
+        break;
       }
     }
+    if (Def)
+      LoopExitInstDef = Def;
   }
+
+  VectorParts RdxParts(UF);
+  for (unsigned Part = 0; Part < UF; ++Part)
+    RdxParts[Part] = State.get(LoopExitInstDef, Part);
 
   // If the vector reduction can be performed in a smaller type, we truncate
   // then extend the loop exit value to enable InstCombine to evaluate the
@@ -3855,9 +3841,7 @@ void InnerLoopVectorizer::fixReduction(VPReductionPHIRecipe *PhiR,
     assert(!PhiR->isInLoop() && "Unexpected truncated inloop reduction!");
     Type *RdxVecTy = VectorType::get(RdxDesc.getRecurrenceType(), VF);
     Builder.SetInsertPoint(VectorLoopLatch->getTerminator());
-    VectorParts RdxParts(UF);
     for (unsigned Part = 0; Part < UF; ++Part) {
-      RdxParts[Part] = State.get(LoopExitInstDef, Part);
       Value *Trunc = Builder.CreateTrunc(RdxParts[Part], RdxVecTy);
       Value *Extnd = RdxDesc.isSigned() ? Builder.CreateSExt(Trunc, VecTy)
                                         : Builder.CreateZExt(Trunc, VecTy);
@@ -3869,14 +3853,12 @@ void InnerLoopVectorizer::fixReduction(VPReductionPHIRecipe *PhiR,
     }
     Builder.SetInsertPoint(LoopMiddleBlock,
                            LoopMiddleBlock->getFirstInsertionPt());
-    for (unsigned Part = 0; Part < UF; ++Part) {
+    for (unsigned Part = 0; Part < UF; ++Part)
       RdxParts[Part] = Builder.CreateTrunc(RdxParts[Part], RdxVecTy);
-      State.reset(LoopExitInstDef, RdxParts[Part], Part);
-    }
   }
 
   // Reduce all of the unrolled parts into a single vector.
-  Value *ReducedPartRdx = State.get(LoopExitInstDef, 0);
+  Value *ReducedPartRdx = RdxParts[0];
   unsigned Op = RecurrenceDescriptor::getOpcode(RK);
 
   // The middle block terminator has already been assigned a DebugLoc here (the
@@ -3888,13 +3870,13 @@ void InnerLoopVectorizer::fixReduction(VPReductionPHIRecipe *PhiR,
   // accidentally cause an extra step back into the loop while debugging.
   State.setDebugLocFrom(LoopMiddleBlock->getTerminator()->getDebugLoc());
   if (PhiR->isOrdered())
-    ReducedPartRdx = State.get(LoopExitInstDef, UF - 1);
+    ReducedPartRdx = RdxParts[UF - 1];
   else {
     // Floating-point operations should have some FMF to enable the reduction.
     IRBuilderBase::FastMathFlagGuard FMFG(Builder);
     Builder.setFastMathFlags(RdxDesc.getFastMathFlags());
     for (unsigned Part = 1; Part < UF; ++Part) {
-      Value *RdxPart = State.get(LoopExitInstDef, Part);
+      Value *RdxPart = RdxParts[Part];
       if (Op != Instruction::ICmp && Op != Instruction::FCmp)
         ReducedPartRdx = Builder.CreateBinOp(
             (Instruction::BinaryOps)Op, RdxPart, ReducedPartRdx, "bin.rdx");
@@ -5142,7 +5124,9 @@ ElementCount LoopVectorizationCostModel::getMaximizedVFForTarget(
     LLVM_DEBUG(dbgs() << "LV: Clamping the MaxVF to maximum power of two not "
                          "exceeding the constant trip count: "
                       << ClampedConstTripCount << "\n");
-    return ElementCount::getFixed(ClampedConstTripCount);
+    return ElementCount::get(
+        ClampedConstTripCount,
+        FoldTailByMasking ? MaxVectorElementCount.isScalable() : false);
   }
 
   TargetTransformInfo::RegisterKind RegKind =
@@ -9099,6 +9083,11 @@ void LoopVectorizationPlanner::adjustRecipesForReductions(
               ? new VPInstruction(Instruction::Select, {Cond, Red, PhiR}, FMFs)
               : new VPInstruction(Instruction::Select, {Cond, Red, PhiR});
       Select->insertBefore(&*Builder.getInsertPoint());
+      if (PreferPredicatedReductionSelect ||
+          TTI.preferPredicatedReductionSelect(
+              PhiR->getRecurrenceDescriptor().getOpcode(), PhiTy,
+              TargetTransformInfo::ReductionFlags()))
+        PhiR->setOperand(1, Select);
     }
   }
 
